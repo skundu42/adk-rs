@@ -5,7 +5,6 @@
 //! by this crate (no provider SDK dependency). Each provider client
 //! translates these into its own wire format.
 
-
 pub mod content;
 pub mod function;
 pub mod generate_content_config;

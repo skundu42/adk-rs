@@ -1,6 +1,5 @@
 //! Anthropic Claude provider for adk-rs.
 
-
 mod client;
 mod convert;
 

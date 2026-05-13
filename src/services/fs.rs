@@ -1,4 +1,6 @@
-//! Filesystem-backed [`ArtifactService`](crate::core::ArtifactService).
+//! Filesystem-backed [`ArtifactService`].
+//!
+//! [`ArtifactService`]: crate::core::ArtifactService
 //!
 //! Layout under `root`:
 //!
@@ -7,7 +9,6 @@
 //!     v000001.json   <-- one file per version, the Part as JSON
 //!     v000002.json
 //! ```
-
 
 use std::path::{Path, PathBuf};
 

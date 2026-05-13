@@ -32,9 +32,7 @@ struct EchoOut {
 /// Returns its `msg` argument unchanged.
 #[tool]
 async fn echo(args: EchoArgs, _ctx: &mut ToolContext) -> adk_rs::Result<EchoOut> {
-    Ok(EchoOut {
-        echoed: args.msg,
-    })
+    Ok(EchoOut { echoed: args.msg })
 }
 
 #[derive(Debug)]

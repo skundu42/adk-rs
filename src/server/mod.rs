@@ -1,7 +1,6 @@
 //! Dev HTTP server (axum) for adk-rs.
 //!
-//! Provides REST + SSE endpoints around a configured [`Runner`].
-
+//! Provides REST + SSE endpoints around a configured [`crate::runner::Runner`].
 
 mod app;
 mod routes;

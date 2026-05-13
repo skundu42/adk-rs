@@ -1,7 +1,6 @@
 //! Tools for adk-rs. Provides the public [`Tool`] alias (re-exported from
 //! `crate::core::DynTool`), a [`FunctionTool`] wrapper, and built-in tools.
 
-
 mod builtin;
 mod function_tool;
 mod toolset;

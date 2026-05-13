@@ -25,11 +25,7 @@ pub(crate) struct StubAgent {
     escalate: bool,
 }
 
-pub(crate) fn stub_agent(
-    name: &str,
-    texts: &[&str],
-    escalate: bool,
-) -> Arc<dyn BaseAgent> {
+pub(crate) fn stub_agent(name: &str, texts: &[&str], escalate: bool) -> Arc<dyn BaseAgent> {
     Arc::new(StubAgent {
         name: name.into(),
         texts: texts.iter().map(|s| (*s).to_string()).collect(),

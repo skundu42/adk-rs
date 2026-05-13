@@ -5,7 +5,6 @@
 //! (`SessionService`, `ArtifactService`, `MemoryService`, `CredentialService`,
 //! `Model`). Implementations live in `adk-services-*` and `adk-providers-*`.
 
-
 pub mod artifact;
 pub mod callback;
 pub mod context;

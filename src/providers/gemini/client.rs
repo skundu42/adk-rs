@@ -247,7 +247,9 @@ mod tests {
             .stream_generate_content(LlmRequest::default())
             .await
             .unwrap();
-        let chunks = crate::providers::gemini::stream::collect_stream(stream).await.unwrap();
+        let chunks = crate::providers::gemini::stream::collect_stream(stream)
+            .await
+            .unwrap();
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].content.as_ref().unwrap().text_concat(), "hi");
     }

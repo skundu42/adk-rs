@@ -133,7 +133,9 @@ pub(crate) fn parse_stream_chunk(payload: &str) -> Result<LlmResponse> {
 mod tests {
     use super::*;
     use crate::core::LlmRequest;
-    use crate::genai_types::{Content, FunctionCall, GenerateContentConfig, Part, Role, Schema, Tool};
+    use crate::genai_types::{
+        Content, FunctionCall, GenerateContentConfig, Part, Role, Schema, Tool,
+    };
     use serde_json::json;
 
     #[test]

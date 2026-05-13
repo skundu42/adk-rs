@@ -3,7 +3,6 @@
 //! Call [`init`] once at process start. Pass a [`TelemetryConfig`] to control
 //! the log level, format, and (with the `otel` feature) an OTLP endpoint.
 
-
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;

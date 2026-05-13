@@ -10,29 +10,29 @@
 #![warn(rust_2018_idioms)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod agents;
+pub mod core;
 pub mod error;
 pub mod genai_types;
-pub mod core;
-pub mod services;
 pub mod providers;
-pub mod tools;
-pub mod agents;
 pub mod runner;
+pub mod services;
+pub mod tools;
 
-#[cfg(feature = "mcp")]
-pub mod mcp;
-#[cfg(feature = "telemetry")]
-pub mod telemetry;
-#[cfg(feature = "eval")]
-pub mod eval;
-#[cfg(feature = "server")]
-pub mod server;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "eval")]
+pub mod eval;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
 
 // Convenience re-exports for the most common types.
-pub use error::{Error, Result};
 pub use agents::{BaseAgent, LlmAgent, LoopAgent, ParallelAgent, SequentialAgent};
+pub use error::{Error, Result};
 pub use runner::Runner;
 pub use tools::Tool;
 

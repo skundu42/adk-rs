@@ -280,7 +280,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_rejects_empty_command() {
-        let err = McpClient::spawn(McpStdioParams::default()).await.unwrap_err();
+        let err = McpClient::spawn(McpStdioParams::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("command is empty"));
     }
 
@@ -305,7 +307,8 @@ mod tests {
 
     #[test]
     fn envelope_deserializes_error() {
-        let payload = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"method not found"}}"#;
+        let payload =
+            r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"method not found"}}"#;
         let env: JsonRpcEnvelope = serde_json::from_str(payload).unwrap();
         let err = env.error.unwrap();
         assert_eq!(err.message, "method not found");
@@ -322,7 +325,8 @@ mod tests {
 
     #[test]
     fn tool_descriptor_round_trip() {
-        let payload = r#"{"name":"weather","description":"look up weather","inputSchema":{"type":"object"}}"#;
+        let payload =
+            r#"{"name":"weather","description":"look up weather","inputSchema":{"type":"object"}}"#;
         let d: McpToolDescriptor = serde_json::from_str(payload).unwrap();
         assert_eq!(d.name, "weather");
         assert_eq!(d.description, "look up weather");

@@ -180,7 +180,12 @@ mod tests {
                 ) -> crate::error::Result<crate::core::ListSessionsResponse> {
                     Ok(crate::core::ListSessionsResponse::default())
                 }
-                async fn delete_session(&self, _: &str, _: &str, _: &str) -> crate::error::Result<()> {
+                async fn delete_session(
+                    &self,
+                    _: &str,
+                    _: &str,
+                    _: &str,
+                ) -> crate::error::Result<()> {
                     Ok(())
                 }
             }

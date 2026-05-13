@@ -4,7 +4,6 @@
 //! over stdin/stdout, and exposes discovered tools as [`crate::core::DynTool`]
 //! implementations.
 
-
 mod client;
 mod tool;
 mod toolset;

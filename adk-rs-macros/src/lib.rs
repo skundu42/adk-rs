@@ -24,7 +24,7 @@
 //! }
 //! ```
 //!
-//! The macro emits a unit struct named after the function (PascalCased) and a
+//! The macro emits a unit struct named after the function (`PascalCased`) and a
 //! free constructor `get_weather() -> Arc<dyn adk_rs::Tool>`. The args
 //! struct must implement `serde::Deserialize` and `schemars::JsonSchema`.
 
@@ -72,6 +72,7 @@ fn doc_comment(attrs: &[syn::Attribute]) -> String {
 
 #[proc_macro_attribute]
 /// `#[adk::tool]` — see crate docs.
+#[allow(clippy::match_on_vec_items)] // `inputs.len() != 2` is checked first
 pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let f = parse_macro_input!(item as ItemFn);
     let vis = &f.vis;

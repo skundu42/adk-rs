@@ -4,7 +4,6 @@
 //! per-subsystem types so call sites keep context while consumers see a
 //! single error type.
 
-
 use std::fmt;
 
 /// Convenience alias for `Result<T, Error>` used throughout the workspace.

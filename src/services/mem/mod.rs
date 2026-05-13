@@ -2,7 +2,6 @@
 //! quickstart scripts, and the dev server. Not durable across process
 //! restarts.
 
-
 mod artifact;
 mod credential;
 mod memory;

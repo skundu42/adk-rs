@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::genai_types::{Content, FunctionDeclaration, GenerateContentConfig, Tool, schema::Schema};
+use crate::genai_types::{
+    Content, FunctionDeclaration, GenerateContentConfig, Tool, schema::Schema,
+};
 
 /// A unified request object sent to a [`crate::core::model::Model`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

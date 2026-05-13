@@ -81,10 +81,8 @@ pub fn exit_loop() -> Arc<dyn DynTool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{GetSessionConfig, ListSessionsResponse, SessionService};
     use crate::core::{InvocationContext, InvocationOrigin, RunConfig, Session, State};
-    use crate::core::{
-        GetSessionConfig, ListSessionsResponse, SessionService,
-    };
     use parking_lot::Mutex;
     use serde_json::json;
     use std::collections::HashMap;

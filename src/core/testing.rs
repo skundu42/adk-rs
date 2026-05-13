@@ -64,11 +64,10 @@ impl Model for MockModel {
 
     async fn generate_content(&self, req: LlmRequest) -> Result<LlmResponse> {
         self.requests.lock().push(req);
-        let r = self
-            .responses
-            .lock()
-            .pop()
-            .ok_or_else(|| crate::error::Error::other("MockModel ran out of queued responses"))?;
+        let r =
+            self.responses.lock().pop().ok_or_else(|| {
+                crate::error::Error::other("MockModel ran out of queued responses")
+            })?;
         Ok(r)
     }
 }

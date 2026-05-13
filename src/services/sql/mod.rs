@@ -7,7 +7,6 @@
 //! At most one backend feature should be enabled at a time. Schema lives
 //! under `migrations/`.
 
-
 #[cfg(feature = "postgres")]
 #[cfg_attr(feature = "sqlite", allow(dead_code, unreachable_pub))]
 mod postgres_backend;
