@@ -6,8 +6,7 @@ use serde_json::Value;
 use crate::core::{LlmRequest, LlmResponse};
 use crate::error::{ProviderError, Result};
 use crate::genai_types::{
-    Content, FinishReason, FunctionCall, FunctionDeclaration, FunctionResponse, Part, Role,
-    UsageMetadata,
+    Content, FinishReason, FunctionCall, FunctionDeclaration, Part, Role, UsageMetadata,
 };
 
 #[derive(Debug, Serialize)]
@@ -260,10 +259,6 @@ pub(crate) fn from_wire_response(r: WireResponse) -> LlmResponse {
         ..LlmResponse::default()
     }
 }
-
-/// Suppress dead-code warnings for the FunctionResponse import (used elsewhere).
-#[allow(dead_code)]
-fn _force_use(_: &FunctionResponse) {}
 
 #[cfg(test)]
 mod tests {

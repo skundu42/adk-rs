@@ -386,12 +386,17 @@ mod tests {
     fn from_schemars_handles_simple_struct() {
         use schemars::JsonSchema;
         #[derive(JsonSchema)]
-        #[allow(dead_code)]
         struct Args {
             /// the user's name
             name: String,
             age: u32,
         }
+        let args = Args {
+            name: "Ada".into(),
+            age: 42,
+        };
+        assert_eq!(args.name, "Ada");
+        assert_eq!(args.age, 42);
         let root = schemars::schema_for!(Args);
         let s = Schema::from_schemars(&root).unwrap();
         assert_eq!(s.r#type, Some(SchemaType::Object));

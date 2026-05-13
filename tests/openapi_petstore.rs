@@ -4,11 +4,11 @@
 #![cfg(all(feature = "openapi", feature = "auth"))]
 
 use adk_rs::auth::credential::AuthCredential;
-use adk_rs::core::testing::MockModel;
 use adk_rs::core::{
     GetSessionConfig, InvocationContext, InvocationOrigin, ListSessionsResponse, RunConfig,
     Session, SessionService, State, ToolContext,
 };
+use adk_rs::genai_types::SchemaType;
 use adk_rs::tools::openapi::OpenAPIToolset;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -164,7 +164,97 @@ async fn post_body_round_trip() {
     assert_eq!(out["body"]["name"], "Fido");
 }
 
-// silence unused-import warnings when MockModel isn't used (kept in case a
-// future test wires through the runner).
-#[allow(dead_code)]
-fn _touch(_m: MockModel) {}
+#[tokio::test]
+async fn path_values_are_encoded_and_cookie_params_are_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pets/a%20b"))
+        .and(header("cookie", "session=abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let spec = format!(
+        r#"
+openapi: 3.0.0
+info:
+  title: Petstore
+  version: 1.0.0
+servers:
+  - url: {}
+paths:
+  /pets/{{id}}:
+    get:
+      operationId: getPetCookie
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: session
+          in: cookie
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+"#,
+        server.uri()
+    );
+    let tools = OpenAPIToolset::from_yaml(&spec).unwrap().into_tools();
+    let tool = tools
+        .into_iter()
+        .find(|t| t.name() == "get_pet_cookie")
+        .expect("get_pet_cookie tool");
+    let mut ctx = ctx_with_auth(None);
+    let out = tool
+        .run(json!({"id": "a b", "session": "abc"}), &mut ctx)
+        .await
+        .unwrap();
+    assert_eq!(out["status"], 200);
+}
+
+#[test]
+fn request_body_refs_are_resolved_in_tool_schema() {
+    let spec = r#"
+openapi: 3.0.0
+info:
+  title: Petstore
+  version: 1.0.0
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+      responses:
+        '201':
+          description: created
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        name:
+          type: string
+      required: [name]
+"#;
+    let tools = OpenAPIToolset::from_yaml(spec).unwrap().into_tools();
+    let create = tools
+        .into_iter()
+        .find(|t| t.name() == "create_pet")
+        .expect("create_pet tool");
+    let decl = create.declaration().expect("declaration");
+    let params = decl.parameters.expect("parameters");
+    let body = params.properties.get("body").expect("body property");
+    assert_eq!(body.r#type, Some(SchemaType::Object));
+    assert!(body.properties.contains_key("name"));
+    assert_eq!(body.required, vec!["name".to_string()]);
+}

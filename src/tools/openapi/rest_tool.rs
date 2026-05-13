@@ -69,6 +69,15 @@ impl DynTool for RestApiTool {
     }
     async fn run(&self, args: Value, ctx: &mut ToolContext) -> Result<Value> {
         let args = args.as_object().cloned().unwrap_or_default();
+        for p in self.parsed().parameters.iter().filter(|p| p.required) {
+            if args.get(&p.py_name).is_none_or(Value::is_null) {
+                return Err(Error::invalid_input(format!(
+                    "missing required parameter `{}`",
+                    p.py_name
+                )));
+            }
+        }
+
         let mut url = format!("{}{}", self.op.base_url.trim_end_matches('/'), self.op.path);
 
         // Path substitution.
@@ -79,7 +88,10 @@ impl DynTool for RestApiTool {
             .filter(|p| p.location == ParamLocation::Path)
         {
             let v = args.get(&p.py_name).cloned().unwrap_or(Value::Null);
-            url = url.replace(&format!("{{{}}}", p.name), &value_to_path_str(&v));
+            url = url.replace(
+                &format!("{{{}}}", p.name),
+                &percent_encode_path_segment(&value_to_path_str(&v)),
+            );
         }
 
         // Query string.
@@ -116,17 +128,27 @@ impl DynTool for RestApiTool {
                 }
             }
         }
+        for p in self
+            .parsed()
+            .parameters
+            .iter()
+            .filter(|p| p.location == ParamLocation::Cookie)
+        {
+            if let Some(v) = args.get(&p.py_name) {
+                if !v.is_null() {
+                    append_cookie(&mut headers, &p.name, &value_to_query_str(v));
+                }
+            }
+        }
 
         // Body.
-        let body_value = args
+        let body_value = self
+            .parsed()
+            .parameters
             .iter()
-            .find(|(_, _)| {
-                self.parsed()
-                    .parameters
-                    .iter()
-                    .any(|p| p.location == ParamLocation::Body)
-            })
-            .and_then(|_| args.get("body"))
+            .any(|p| p.location == ParamLocation::Body)
+            .then(|| args.get("body"))
+            .flatten()
             .cloned();
 
         // Auth injection from ctx.auth_credential.
@@ -180,6 +202,32 @@ fn value_to_query_str(v: &Value) -> String {
     }
 }
 
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+fn append_cookie(headers: &mut reqwest::header::HeaderMap, name: &str, value: &str) {
+    let cookie = match headers.get(reqwest::header::COOKIE) {
+        Some(existing) => match existing.to_str() {
+            Ok(s) if !s.is_empty() => format!("{s}; {name}={value}"),
+            _ => format!("{name}={value}"),
+        },
+        None => format!("{name}={value}"),
+    };
+    if let Ok(hv) = reqwest::header::HeaderValue::from_str(&cookie) {
+        headers.insert(reqwest::header::COOKIE, hv);
+    }
+}
+
 fn inject_credential(
     cred: &AuthCredential,
     scheme: &AuthScheme,
@@ -204,9 +252,7 @@ fn inject_credential(
                     query.insert(name.clone(), k.to_string());
                 }
                 ApiKeyLocation::Cookie => {
-                    if let Ok(hv) = reqwest::header::HeaderValue::from_str(&format!("{name}={k}")) {
-                        headers.insert(reqwest::header::COOKIE, hv);
-                    }
+                    append_cookie(headers, name, k);
                 }
             }
         }

@@ -115,12 +115,12 @@ fn build_operation(
     let combined: Vec<&ReferenceOr<Parameter>> =
         path_params.iter().chain(op.parameters.iter()).collect();
     for p in combined {
-        if let Some(ap) = parameter_to_api_param(api, p) {
+        if let Some(ap) = parameter_to_api_param(api, p)? {
             parameters.push(ap);
         }
     }
     if let Some(body) = op.request_body.as_ref() {
-        parameters.extend(request_body_to_params(api, body));
+        parameters.extend(request_body_to_params(api, body)?);
     }
     // Operation-level params override path-level on (name, location) collision.
     parameters = dedupe_keep_last(parameters);
@@ -152,9 +152,12 @@ fn dedupe_keep_last(params: Vec<ApiParameter>) -> Vec<ApiParameter> {
     seen.into_iter().map(|(_, v)| v).collect()
 }
 
-fn parameter_to_api_param(_api: &OpenAPI, p: &ReferenceOr<Parameter>) -> Option<ApiParameter> {
+fn parameter_to_api_param(
+    api: &OpenAPI,
+    p: &ReferenceOr<Parameter>,
+) -> Result<Option<ApiParameter>> {
     let ReferenceOr::Item(param) = p else {
-        return None;
+        return Ok(None);
     };
     let (data, location) = match param {
         Parameter::Query { parameter_data, .. } => (parameter_data, ParamLocation::Query),
@@ -162,58 +165,82 @@ fn parameter_to_api_param(_api: &OpenAPI, p: &ReferenceOr<Parameter>) -> Option<
         Parameter::Path { parameter_data, .. } => (parameter_data, ParamLocation::Path),
         Parameter::Cookie { parameter_data, .. } => (parameter_data, ParamLocation::Cookie),
     };
-    Some(parameter_data_to_api_param(data, location))
+    Ok(Some(parameter_data_to_api_param(api, data, location)?))
 }
 
-fn parameter_data_to_api_param(data: &ParameterData, location: ParamLocation) -> ApiParameter {
+fn parameter_data_to_api_param(
+    api: &OpenAPI,
+    data: &ParameterData,
+    location: ParamLocation,
+) -> Result<ApiParameter> {
     let schema = match &data.format {
-        ParameterSchemaOrContent::Schema(s) => schema_or_ref_to_schema(s),
+        ParameterSchemaOrContent::Schema(s) => schema_or_ref_to_schema(api, s)?,
         ParameterSchemaOrContent::Content(_) => Schema::string(),
     };
-    ApiParameter {
+    Ok(ApiParameter {
         name: data.name.clone(),
         py_name: to_snake_case(&data.name),
         location,
         schema,
         required: data.required,
         description: data.description.clone(),
-    }
+    })
 }
 
-fn request_body_to_params(_api: &OpenAPI, rb: &ReferenceOr<RequestBody>) -> Vec<ApiParameter> {
+fn request_body_to_params(
+    api: &OpenAPI,
+    rb: &ReferenceOr<RequestBody>,
+) -> Result<Vec<ApiParameter>> {
     let ReferenceOr::Item(body) = rb else {
-        return vec![];
+        return Ok(vec![]);
     };
     // Prefer application/json; fall back to first content type.
     let media = body
         .content
         .get("application/json")
         .or_else(|| body.content.values().next());
-    let Some(media) = media else { return vec![] };
-    let Some(schema) = media.schema.as_ref() else {
-        return vec![];
+    let Some(media) = media else {
+        return Ok(vec![]);
     };
-    let schema = schema_or_ref_to_schema(schema);
-    vec![ApiParameter {
+    let Some(schema) = media.schema.as_ref() else {
+        return Ok(vec![]);
+    };
+    let schema = schema_or_ref_to_schema(api, schema)?;
+    Ok(vec![ApiParameter {
         name: "body".into(),
         py_name: "body".into(),
         location: ParamLocation::Body,
         schema,
         required: body.required,
         description: body.description.clone(),
-    }]
+    }])
 }
 
-fn schema_or_ref_to_schema(s: &ReferenceOr<openapiv3::Schema>) -> Schema {
+fn schema_or_ref_to_schema(api: &OpenAPI, s: &ReferenceOr<openapiv3::Schema>) -> Result<Schema> {
     match s {
-        ReferenceOr::Item(s) => openapi_schema_to_adk_schema(s),
-        ReferenceOr::Reference { .. } => Schema::string(), // unresolved $refs become string (v0.2 stub)
+        ReferenceOr::Item(s) => openapi_schema_to_adk_schema(api, s),
+        ReferenceOr::Reference { reference } => {
+            let Some(target) = resolve_schema_ref(api, reference) else {
+                return Err(Error::config(format!(
+                    "unsupported or unresolved OpenAPI schema ref `{reference}`"
+                )));
+            };
+            schema_or_ref_to_schema(api, target)
+        }
     }
 }
 
-fn openapi_schema_to_adk_schema(s: &openapiv3::Schema) -> Schema {
+fn resolve_schema_ref<'a>(
+    api: &'a OpenAPI,
+    reference: &str,
+) -> Option<&'a ReferenceOr<openapiv3::Schema>> {
+    let name = reference.strip_prefix("#/components/schemas/")?;
+    api.components.as_ref()?.schemas.get(name)
+}
+
+fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<Schema> {
     use openapiv3::Type;
-    match &s.schema_kind {
+    let schema = match &s.schema_kind {
         SchemaKind::Type(t) => match t {
             Type::String(_) => Schema::string(),
             Type::Number(_) => Schema::number(),
@@ -223,14 +250,15 @@ fn openapi_schema_to_adk_schema(s: &openapiv3::Schema) -> Schema {
                 let item = arr
                     .items
                     .as_ref()
-                    .map(|i| schema_or_ref_to_schema(&i.clone().unbox()))
+                    .map(|i| schema_or_ref_to_schema(api, &i.clone().unbox()))
+                    .transpose()?
                     .unwrap_or_else(Schema::string);
                 Schema::array(item)
             }
             Type::Object(obj) => {
                 let mut s = Schema::object();
                 for (k, v) in &obj.properties {
-                    s = s.property(k.clone(), schema_or_ref_to_schema(&v.clone().unbox()));
+                    s = s.property(k.clone(), schema_or_ref_to_schema(api, &v.clone().unbox())?);
                 }
                 for r in &obj.required {
                     s = s.require(r.clone());
@@ -239,7 +267,8 @@ fn openapi_schema_to_adk_schema(s: &openapiv3::Schema) -> Schema {
             }
         },
         _ => Schema::string(),
-    }
+    };
+    Ok(schema)
 }
 
 fn collect_security_schemes(api: &OpenAPI) -> IndexMap<String, AuthScheme> {

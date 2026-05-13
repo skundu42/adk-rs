@@ -53,19 +53,14 @@ struct JsonRpcReq<'a> {
 /// Incoming envelope (response or notification).
 #[derive(Debug, Deserialize)]
 struct JsonRpcEnvelope {
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
     id: Option<u64>,
     method: Option<String>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
-    #[allow(dead_code)]
-    params: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
-    #[allow(dead_code)]
     code: i32,
     message: String,
 }
@@ -134,7 +129,7 @@ impl McpClient {
                             let tx_opt = pending_for_reader.lock().remove(&id);
                             if let Some(tx) = tx_opt {
                                 let result = match env.error {
-                                    Some(e) => Err(e.message),
+                                    Some(e) => Err(format!("{} ({})", e.message, e.code)),
                                     None => Ok(env.result.unwrap_or(Value::Null)),
                                 };
                                 let _ = tx.send(result);

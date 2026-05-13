@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use crate::core::{Artifact, ArtifactKey, ArtifactService};
+use crate::core::{ArtifactKey, ArtifactService};
 use crate::error::Result;
 use crate::genai_types::Part;
 
@@ -40,6 +40,9 @@ impl ArtifactService for InMemoryArtifactService {
             return Ok(None);
         };
         if snap.is_empty() {
+            return Ok(None);
+        }
+        if version == Some(0) {
             return Ok(None);
         }
         let v = version
@@ -80,11 +83,6 @@ impl ArtifactService for InMemoryArtifactService {
     }
 }
 
-#[allow(dead_code)] // future helper for callers that want the typed artifact.
-pub(crate) fn as_artifact(part: Part, version: u64) -> Artifact {
-    Artifact { part, version }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +108,13 @@ mod tests {
         svc.save_artifact(key(), Part::text("v2")).await.unwrap();
         let got = svc.load_artifact(key(), Some(1)).await.unwrap().unwrap();
         assert_eq!(got.as_text(), Some("v1"));
+    }
+
+    #[tokio::test]
+    async fn version_zero_is_missing() {
+        let svc = InMemoryArtifactService::new();
+        svc.save_artifact(key(), Part::text("v1")).await.unwrap();
+        assert!(svc.load_artifact(key(), Some(0)).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -113,7 +113,30 @@ impl BaseAgent for LlmAgent {
                 .collect();
             req.contents = history;
             if let Some(user) = &ctx2.user_content {
-                req.contents.push(user.clone());
+                if req.contents.last() != Some(user) {
+                    req.contents.push(user.clone());
+                }
+            }
+
+            let replayed_responses = replay_resumed_tool_calls(&ctx2, &req).await?;
+            if !replayed_responses.is_empty() {
+                let replay_event = function_response_event(
+                    &me.name,
+                    &ctx2.invocation_id,
+                    replayed_responses.clone(),
+                );
+                {
+                    let mut sess = ctx2.session.lock();
+                    sess.events.push(replay_event.clone());
+                }
+                yield replay_event;
+                req.contents.push(Content {
+                    role: Role::Tool,
+                    parts: replayed_responses
+                        .into_iter()
+                        .map(Part::FunctionResponse)
+                        .collect(),
+                });
             }
 
             for _iter in 0..me.max_iterations {
@@ -200,6 +223,7 @@ impl BaseAgent for LlmAgent {
                 let mut transfer: Option<String> = None;
                 let mut escalate = false;
                 let mut long_running_any = false;
+                let mut long_running_tool_ids = Vec::new();
                 for fc in &calls {
                     let tool = req
                         .tools_dict
@@ -227,22 +251,36 @@ impl BaseAgent for LlmAgent {
                     if tctx.escalate { escalate = true; }
                     let will_continue = if tool.is_long_running() || tctx.long_running {
                         long_running_any = true;
+                        long_running_tool_ids.push(
+                            fc.id.clone().unwrap_or_else(|| fc.name.clone())
+                        );
                         Some(true)
                     } else if auth_pending {
                         // Bubble the pending auth response back via will_continue
                         // so the caller knows to resume after consent.
                         long_running_any = true;
+                        long_running_tool_ids.push(
+                            fc.id.clone().unwrap_or_else(|| fc.name.clone())
+                        );
                         Some(true)
                     } else {
                         None
                     };
+                    let response_name = if auth_pending {
+                        crate::auth::REQUEST_CREDENTIAL_FUNCTION_NAME.to_string()
+                    } else {
+                        fc.name.clone()
+                    };
                     tool_responses.push(
-                        FunctionResponse { id: fc.id.clone(), name: fc.name.clone(), response: value, will_continue, scheduling: None }
+                        FunctionResponse { id: fc.id.clone(), name: response_name, response: value, will_continue, scheduling: None }
                     );
                 }
 
                 // Emit a tool-response event.
-                let tool_event = function_response_event(&me.name, &ctx2.invocation_id, tool_responses.clone());
+                let mut tool_event = function_response_event(&me.name, &ctx2.invocation_id, tool_responses.clone());
+                if !long_running_tool_ids.is_empty() {
+                    tool_event.long_running_tool_ids = Some(long_running_tool_ids);
+                }
                 {
                     let mut sess = ctx2.session.lock();
                     sess.events.push(tool_event.clone());
@@ -371,6 +409,58 @@ fn function_response_event(
         partial: None,
         turn_complete: None,
     }
+}
+
+async fn replay_resumed_tool_calls(
+    ctx: &Arc<InvocationContext>,
+    req: &LlmRequest,
+) -> Result<Vec<FunctionResponse>> {
+    let ids = resumed_tool_call_ids(ctx);
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = ctx.session.lock().events.clone();
+    let mut responses = Vec::new();
+    for id in ids {
+        let Some(fc) = events
+            .iter()
+            .flat_map(Event::function_calls)
+            .find(|fc| fc.id.as_deref() == Some(id.as_str()))
+        else {
+            continue;
+        };
+        let tool = req
+            .tools_dict
+            .get(&fc.name)
+            .cloned()
+            .ok_or_else(|| Error::from(crate::error::ToolError::Unknown(fc.name.clone())))?;
+        let mut tctx = ToolContext::new(ctx.clone());
+        tctx.function_call_id = fc.id.clone();
+        let (auth_pending, value) =
+            resolve_auth_and_run(tool.as_ref(), fc.args.clone(), &mut tctx).await?;
+        let name = if auth_pending {
+            crate::auth::REQUEST_CREDENTIAL_FUNCTION_NAME.to_string()
+        } else {
+            fc.name.clone()
+        };
+        responses.push(FunctionResponse {
+            id: fc.id.clone(),
+            name,
+            response: value,
+            will_continue: auth_pending.then_some(true),
+            scheduling: None,
+        });
+    }
+    Ok(responses)
+}
+
+fn resumed_tool_call_ids(ctx: &InvocationContext) -> Vec<String> {
+    ctx.attributes
+        .lock()
+        .get("auth.resumed_tool_call_ids")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// Extract `(language, code)` from any `ExecutableCode` parts in the event.

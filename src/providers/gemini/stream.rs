@@ -2,8 +2,8 @@
 
 use futures::stream::StreamExt;
 
-use crate::core::{LlmResponse, LlmResponseStream};
-use crate::error::{ProviderError, Result};
+use crate::core::LlmResponseStream;
+use crate::error::ProviderError;
 
 use crate::providers::gemini::convert;
 
@@ -30,16 +30,10 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
     Box::pin(mapped) as LlmResponseStream
 }
 
-#[allow(dead_code)] // exposed for tests in client.rs
-pub(crate) fn boxed_one(r: LlmResponse) -> LlmResponseStream {
-    use futures::stream;
-    Box::pin(stream::once(async move { Ok::<_, crate::error::Error>(r) }))
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn collect_stream(
     s: LlmResponseStream,
-) -> impl std::future::Future<Output = Result<Vec<LlmResponse>>> + Send {
+) -> impl std::future::Future<Output = crate::error::Result<Vec<crate::core::LlmResponse>>> + Send {
     use futures::TryStreamExt;
     s.try_collect::<Vec<_>>()
 }
