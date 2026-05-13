@@ -1,150 +1,12 @@
 [workspace]
 resolver = "3"
-members = [
-    "adk-rs-error",
-    "adk-rs-genai-types",
-    "adk-rs-core",
-    "adk-rs-services-mem",
-    "adk-rs-services-fs",
-    "adk-rs-services-sql",
-    "adk-rs-providers-gemini",
-    "adk-rs-providers-anthropic",
-    "adk-rs-providers-openai",
-    "adk-rs-tools",
-    "adk-rs-tools-macros",
-    "adk-rs-agents",
-    "adk-rs-runner",
-    "adk-rs-mcp",
-    "adk-rs-telemetry",
-    "adk-rs-eval",
-    "adk-rs-server",
-    "adk-rs-cli",
-    "examples",
-]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
-license = "Apache-2.0"
-repository = "https://github.com/skundu42/adk-rs"
-homepage = "https://github.com/skundu42/adk-rs"
-authors = ["Sandipan Kundu <sandipank.dev@gmail.com>"]
-readme = "README.md"
-keywords = ["agent", "llm", "ai", "adk", "tools", "ai-sdk"]
-categories = ["api-bindings", "asynchronous"]
-
-[workspace.dependencies]
-# Internal crates
-adk-rs-error = { path = "adk-rs-error", version = "0.1.0" }
-adk-rs-genai-types = { path = "adk-rs-genai-types", version = "0.1.0" }
-adk-rs-core = { path = "adk-rs-core", version = "0.1.0" }
-adk-rs-services-mem = { path = "adk-rs-services-mem", version = "0.1.0" }
-adk-rs-services-fs = { path = "adk-rs-services-fs", version = "0.1.0" }
-adk-rs-services-sql = { path = "adk-rs-services-sql", version = "0.1.0" }
-adk-rs-providers-gemini = { path = "adk-rs-providers-gemini", version = "0.1.0" }
-adk-rs-providers-anthropic = { path = "adk-rs-providers-anthropic", version = "0.1.0" }
-adk-rs-providers-openai = { path = "adk-rs-providers-openai", version = "0.1.0" }
-adk-rs-tools = { path = "adk-rs-tools", version = "0.1.0" }
-adk-rs-tools-macros = { path = "adk-rs-tools-macros", version = "0.1.0" }
-adk-rs-agents = { path = "adk-rs-agents", version = "0.1.0" }
-adk-rs-runner = { path = "adk-rs-runner", version = "0.1.0" }
-adk-rs-mcp = { path = "adk-rs-mcp", version = "0.1.0" }
-adk-rs-telemetry = { path = "adk-rs-telemetry", version = "0.1.0" }
-adk-rs-eval = { path = "adk-rs-eval", version = "0.1.0" }
-adk-rs-server = { path = "adk-rs-server", version = "0.1.0" }
-adk-rs-cli = { path = "adk-rs-cli", version = "0.1.0" }
-
-# Error handling
-thiserror = "2"
-
-# Serde / JSON
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-serde_with = "3"
-indexmap = { version = "2", features = ["serde"] }
-schemars = { version = "0.8", features = ["preserve_order"] }
-
-# Async / streams
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "time", "process", "signal", "net"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-futures = "0.3"
-futures-util = "0.3"
-async-trait = "0.1"
-pin-project-lite = "0.2"
-async-stream = "0.3"
-
-# HTTP / SSE
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"] }
-eventsource-stream = "0.2"
-url = "2"
-bytes = "1"
-http = "1"
-http-body-util = "0.1"
-
-# Tracing / logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-tracing-futures = "0.2"
-
-# OpenTelemetry
-opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"] }
-tracing-opentelemetry = "0.28"
-
-# Data / IDs / time
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-base64 = "0.22"
-mime = "0.3"
-mime_guess = "2"
-
-# Concurrent collections
-dashmap = "6"
-parking_lot = "0.12"
-arc-swap = "1"
-
-# Utility
-once_cell = "1"
-itertools = "0.13"
-regex = "1"
-globset = "0.4"
-
-# CLI / config
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
-config = { version = "0.14", default-features = false, features = ["toml", "yaml", "json"] }
-
-# Web server
-axum = { version = "0.7", features = ["macros", "ws", "multipart"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "fs", "compression-gzip", "request-id"] }
-
-# Database
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "macros", "json", "chrono", "uuid", "migrate"] }
-
-# Proc-macro
-syn = { version = "2", features = ["full", "extra-traits"] }
-quote = "1"
-proc-macro2 = "1"
-darling = "0.20"
-
-# Testing
-insta = { version = "1", features = ["json", "yaml", "redactions"] }
-wiremock = "=0.6.4"
-proptest = "1"
-trybuild = "1"
-tempfile = "3"
-similar-asserts = "1"
+members = [".", "adk-rs-macros"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unused_must_use = "deny"
 unused_lifetimes = "warn"
-unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -172,6 +34,132 @@ use_self = "allow"
 redundant_pub_crate = "allow"
 future_not_send = "allow"
 cognitive_complexity = "allow"
+
+[package]
+name = "adk-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/skundu42/adk-rs"
+homepage = "https://github.com/skundu42/adk-rs"
+authors = ["Sandipan Kundu <sandipank.dev@gmail.com>"]
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "adk", "ai-sdk"]
+categories = ["api-bindings", "asynchronous"]
+description = "Rust port of the Google Agent Development Kit (ADK)."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Providers
+gemini = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
+anthropic = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
+openai = ["dep:reqwest"]
+# Storage backends
+fs = []
+sqlite = ["dep:sqlx", "sqlx/sqlite"]
+postgres = ["dep:sqlx", "sqlx/postgres"]
+# Subsystems
+mcp = []
+telemetry = ["dep:tracing-subscriber"]
+otel = ["telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+eval = []
+server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
+cli = ["dep:clap", "telemetry", "server", "eval"]
+macros = ["dep:adk-rs-macros"]
+# Test-only helpers
+testing = []
+# Convenience: everything on
+full = [
+    "gemini", "anthropic", "openai",
+    "fs", "sqlite",
+    "mcp", "telemetry", "eval", "server", "cli", "macros",
+    "testing",
+]
+
+[dependencies]
+# Always-on core deps
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_with = "3"
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "0.8", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "io-util", "time", "process", "signal", "net"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+pin-project-lite = "0.2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+base64 = "0.22"
+bytes = "1"
+dashmap = "6"
+parking_lot = "0.12"
+arc-swap = "1"
+globset = "0.4"
+
+# Provider deps (feature-gated)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"], optional = true }
+eventsource-stream = { version = "0.2", optional = true }
+url = { version = "2", optional = true }
+
+# Storage deps
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "macros", "json", "chrono", "uuid", "migrate"], optional = true }
+
+# Telemetry deps
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+# Server deps
+axum = { version = "0.7", features = ["macros", "ws", "multipart"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs", "compression-gzip", "request-id"], optional = true }
+http = { version = "1", optional = true }
+
+# CLI deps
+clap = { version = "4", features = ["derive", "env", "wrap_help"], optional = true }
+
+# Proc-macro
+adk-rs-macros = { path = "adk-rs-macros", version = "0.1.0", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+similar-asserts = "1"
+tempfile = "3"
+wiremock = "=0.6.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tower = "0.5"
+http-body-util = "0.1"
+trybuild = "1"
+
+[[example]]
+name = "gemini_chat"
+required-features = ["gemini"]
+
+[[example]]
+name = "weather_agent"
+required-features = ["gemini", "macros"]
+
+[[example]]
+name = "three_providers"
+required-features = ["gemini", "anthropic", "openai"]
+
+[[test]]
+name = "server_http"
+required-features = ["server", "testing"]
+
+[[test]]
+name = "macro_expansion"
+required-features = ["macros", "testing"]
 
 [profile.release]
 opt-level = 3
