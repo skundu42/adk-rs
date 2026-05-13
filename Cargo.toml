@@ -149,6 +149,11 @@ eval = []
 server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
 cli = ["dep:clap", "telemetry", "server", "eval"]
 macros = ["dep:adk-rs-macros"]
+# Auth + tool catalog + code executors (v0.2)
+auth = ["dep:reqwest", "dep:url", "dep:oauth2", "dep:jsonwebtoken", "dep:rsa", "dep:rand"]
+openapi = ["dep:reqwest", "dep:url", "dep:openapiv3", "dep:serde_yaml"]
+code-exec = []
+code-exec-docker = ["code-exec"]
 # Test-only helpers
 testing = []
 # Convenience: everything on
@@ -156,6 +161,7 @@ full = [
     "gemini", "anthropic", "openai",
     "fs", "sqlite",
     "mcp", "telemetry", "eval", "server", "cli", "macros",
+    "auth", "openapi", "code-exec", "code-exec-docker",
     "testing",
 ]
 
@@ -182,6 +188,7 @@ dashmap = "6"
 parking_lot = "0.12"
 arc-swap = "1"
 globset = "0.4"
+sha2 = "0.10"
 
 # Provider deps (feature-gated)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"], optional = true }
@@ -210,6 +217,18 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"], optional = tr
 # Proc-macro
 adk-rs-macros = { path = "adk-rs-macros", version = "0.1.0", optional = true }
 
+# Auth deps (feature = "auth")
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
+rsa = { version = "0.9", optional = true }
+rand = { version = "0.8", optional = true }
+
+# OpenAPI deps (feature = "openapi")
+openapiv3 = { version = "2", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+
+# (Docker code executor uses the `docker` CLI on $PATH; no Rust dep needed.)
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 similar-asserts = "1"
@@ -232,6 +251,10 @@ required-features = ["gemini", "macros"]
 name = "three_providers"
 required-features = ["gemini", "anthropic", "openai"]
 
+[[example]]
+name = "code_agent"
+required-features = ["code-exec", "testing"]
+
 [[test]]
 name = "server_http"
 required-features = ["server", "testing"]
@@ -239,6 +262,14 @@ required-features = ["server", "testing"]
 [[test]]
 name = "macro_expansion"
 required-features = ["macros", "testing"]
+
+[[test]]
+name = "auth_oauth2"
+required-features = ["auth"]
+
+[[test]]
+name = "openapi_petstore"
+required-features = ["openapi", "auth", "testing"]
 
 [profile.release]
 opt-level = 3

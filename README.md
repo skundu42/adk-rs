@@ -14,7 +14,6 @@ Agent Development Kit (ADK) is a flexible, modular framework that applies softwa
 - **Production telemetry** — `tracing` integration with optional OpenTelemetry OTLP export.
 - **Evaluation framework** — replay JSON eval sets (compatible with the Python ADK format) and score with trajectory and LLM-judge metrics.
 - **Dev server + CLI scaffolding** — an `axum`-based HTTP/SSE server and a library-style CLI that you embed in your own binary.
-- **Safety first** — `#![forbid(unsafe_code)]` across the workspace; pedantic Clippy enabled; no global mutable state.
 
 ## 🚀 Installation
 
@@ -40,6 +39,10 @@ futures = "0.3"
 | `server` | axum dev server with SSE |
 | `cli` | embeddable `clap`-based CLI scaffolding |
 | `macros` | the `#[tool]` proc-macro |
+| `auth` | OAuth2 / ServiceAccount / API-key / HTTP credential flow |
+| `openapi` | generate tools from an OpenAPI 3.x spec |
+| `code-exec` | local-subprocess code executor |
+| `code-exec-docker` | extra: ephemeral Docker container per call (`docker` on `$PATH`) |
 | `full` | enables all of the above |
 
 Requires Rust **1.85+** (edition 2024).
@@ -123,6 +126,57 @@ let coordinator = LlmAgent::builder("coordinator")
 ```
 
 `SequentialAgent`, `ParallelAgent`, and `LoopAgent` provide explicit orchestration when LLM-driven delegation is not appropriate.
+
+## 🔐 Authenticated tools (`feature = "auth"`)
+
+`adk-rs` ships full Python ADK parity for the credential lifecycle: OAuth 2.0 (authorization-code + PKCE, client-credentials, refresh-token), Service Account JWTs (Google-style RS256), API keys, and HTTP basic/bearer. When a tool declares `auth_config()`, the runner resolves the credential via `CredentialManager` *before* dispatch and injects it into `ToolContext::auth_credential`. If the underlying flow requires interactive consent (authorization-code), the agent emits a synthetic `adk_request_credential` function-call response and pauses; the caller resubmits the exchanged credential on the next turn.
+
+```rust
+use adk_rs::auth::{AuthConfig, AuthCredential, AuthScheme, ApiKeyLocation};
+
+let cfg = AuthConfig::new(AuthScheme::ApiKey {
+    location: ApiKeyLocation::Header,
+    name: "X-API-Key".into(),
+    description: None,
+}).with_raw(AuthCredential::api_key("secret"));
+```
+
+## 🌐 OpenAPI tool generator (`feature = "openapi"`)
+
+Point [`OpenAPIToolset`](src/tools/openapi/) at an OpenAPI 3.x spec and get one tool per operation. Security schemes from the spec map to `AuthConfig` automatically:
+
+```rust
+use adk_rs::auth::AuthCredential;
+use adk_rs::tools::openapi::OpenAPIToolset;
+
+let tools = OpenAPIToolset::from_path("petstore.yaml")?
+    .with_credential("bearerAuth", AuthCredential::bearer(std::env::var("PETS_TOKEN")?))
+    .into_tools();
+
+let agent = LlmAgent::builder("pets")
+    .model(model)
+    .tools(tools)
+    .build()?;
+```
+
+## 🐍 Code execution (`feature = "code-exec"`)
+
+Attach a [`CodeExecutor`](src/code_exec/) to an `LlmAgent` and the agent will run any `ExecutableCode` parts the model emits, feeding `CodeExecutionResult` back on the next turn.
+
+```rust
+use adk_rs::code_exec::local::LocalCodeExecutor;
+use std::sync::Arc;
+
+let agent = LlmAgent::builder("coder")
+    .model(model)
+    .code_executor(Arc::new(LocalCodeExecutor::new())) // python3 on $PATH
+    .build()?;
+```
+
+Two executors ship in the box:
+
+- **`LocalCodeExecutor`** — spawns a child interpreter via `tokio::process` with a configurable timeout. Subprocess isolation only; **not a security boundary**.
+- **`ContainerCodeExecutor`** (`feature = "code-exec-docker"`) — shells out to `docker run --rm --network=none --read-only ...` for a fresh ephemeral container per call. Requires the `docker` CLI.
 
 ## 🛠 Defining a tool
 
@@ -229,8 +283,11 @@ let report = runner.run_set(&set).await?;
 | [`providers::gemini`](src/providers/gemini/) | `gemini` | Gemini REST + SSE provider. |
 | [`providers::anthropic`](src/providers/anthropic/) | `anthropic` | Anthropic Messages API + SSE provider. |
 | [`providers::openai`](src/providers/openai/) | `openai` | OpenAI-compatible provider (Azure / Ollama / Groq via base-URL). |
-| [`tools`](src/tools/) | always on | `Tool` trait, `FunctionTool`, built-ins. |
+| [`tools`](src/tools/) | always on | `Tool` trait, `FunctionTool`, built-ins, `load_artifacts`, `load_memory`, `get_user_choice`, `agent_tool`, `LongRunningFunctionTool`. |
+| [`tools::openapi`](src/tools/openapi/) | `openapi` | `OpenAPIToolset` — generate `RestApiTool`s from an OpenAPI 3.x spec. |
 | [`agents`](src/agents/) | always on | `BaseAgent`, `LlmAgent`, `SequentialAgent`, `ParallelAgent`, `LoopAgent`. |
+| [`auth`](src/auth/) | types always on, flow gated on `auth` | `AuthCredential`, `AuthScheme`, `AuthConfig`, `CredentialService`, `CredentialManager`, OAuth2 `AuthHandler`, `AuthPreprocessor`. |
+| [`code_exec`](src/code_exec/) | `code-exec` | `CodeExecutor` trait; `LocalCodeExecutor`, `ContainerCodeExecutor`. |
 | [`runner`](src/runner/) | always on | Orchestration: LLM flow, tool dispatch, agent transfer, plugins. |
 | [`mcp`](src/mcp/) | `mcp` | MCP stdio client and `McpToolset`. |
 | [`telemetry`](src/telemetry.rs) | `telemetry` (+ `otel`) | `tracing-subscriber` setup with optional OTLP export. |
@@ -247,9 +304,11 @@ Runnable demos live under [`examples/`](examples/):
 - [`gemini_chat`](examples/gemini_chat.rs) — minimal single-agent loop.
 - [`weather_agent`](examples/weather_agent.rs) — `#[tool]`-defined function tool.
 - [`three_providers`](examples/three_providers.rs) — the same prompt against Gemini, Claude, and OpenAI.
+- [`code_agent`](examples/code_agent.rs) — agent that emits shell snippets, runner executes them via `LocalCodeExecutor`.
 
 ```sh
 cargo run --example weather_agent --features "gemini,macros"
+cargo run --example code_agent --features "code-exec,testing"
 ```
 
 ## 🤝 Contributing

@@ -11,6 +11,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agents;
+pub mod auth;
 pub mod core;
 pub mod error;
 pub mod genai_types;
@@ -18,6 +19,9 @@ pub mod providers;
 pub mod runner;
 pub mod services;
 pub mod tools;
+
+#[cfg(feature = "code-exec")]
+pub mod code_exec;
 
 #[cfg(feature = "cli")]
 pub mod cli;

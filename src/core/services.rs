@@ -129,14 +129,12 @@ pub trait MemoryService: Send + Sync + std::fmt::Debug + 'static {
 }
 
 /// Service for storing and refreshing tool credentials.
-#[async_trait]
-pub trait CredentialService: Send + Sync + std::fmt::Debug + 'static {
-    /// Load a credential value by key.
-    async fn load(&self, app_name: &str, user_id: &str, key: &str) -> Result<Option<String>>;
-
-    /// Store a credential value by key.
-    async fn save(&self, app_name: &str, user_id: &str, key: &str, value: &str) -> Result<()>;
-}
+///
+/// Re-exported from [`crate::auth::CredentialService`] so existing imports
+/// from `crate::core::CredentialService` continue to work. As of v0.2 the
+/// trait works on structured [`crate::auth::AuthCredential`] values rather
+/// than opaque strings.
+pub use crate::auth::CredentialService;
 
 /// Helper used by simpler `SessionService` impls.
 pub fn new_session_id() -> SessionId {

@@ -24,8 +24,24 @@ pub trait DynTool: Send + Sync + std::fmt::Debug + 'static {
     fn description(&self) -> &str;
 
     /// Whether this tool yields a long-running operation.
+    ///
+    /// When `true`, the agent emits the tool's `FunctionResponse` with
+    /// `will_continue: Some(true)`. The caller is responsible for resubmitting
+    /// the final result by including a fresh `FunctionResponse` on a
+    /// subsequent invocation.
     fn is_long_running(&self) -> bool {
         false
+    }
+
+    /// Auth requirements for this tool. When `Some`, the runner resolves the
+    /// credential via [`crate::auth::CredentialManager`] *before* calling
+    /// [`Self::run`], and injects the result into
+    /// [`crate::core::ToolContext::auth_credential`]. When the underlying
+    /// flow needs interactive consent the runner emits an
+    /// `adk_request_credential` function-call event instead of dispatching
+    /// the tool.
+    fn auth_config(&self) -> Option<&crate::auth::AuthConfig> {
+        None
     }
 
     /// JSON-Schema declaration of the tool's parameters; `None` for tools

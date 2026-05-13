@@ -112,6 +112,10 @@ pub struct ToolContext {
     pub escalate: bool,
     /// If true, the tool returned a long-running operation handle.
     pub long_running: bool,
+    /// Resolved credential, set by the runner before `run` when the tool
+    /// declared an `auth_config()`. Authenticated tools should read their
+    /// access token / API key from here rather than from the args.
+    pub auth_credential: Option<crate::auth::AuthCredential>,
 }
 
 impl ToolContext {
@@ -126,6 +130,7 @@ impl ToolContext {
             transfer_to_agent: None,
             escalate: false,
             long_running: false,
+            auth_credential: None,
         }
     }
 

@@ -54,6 +54,9 @@ pub struct LlmAgent {
     disable_transfer: bool,
     /// Max iterations of the LLM↔tool loop within a single agent run.
     max_iterations: u32,
+    /// Optional executor for `ExecutableCode` parts emitted by the model.
+    #[cfg(feature = "code-exec")]
+    code_executor: Option<Arc<dyn crate::code_exec::CodeExecutor>>,
 }
 
 impl LlmAgent {
@@ -127,6 +130,61 @@ impl BaseAgent for LlmAgent {
 
                 let calls = event.function_calls();
                 if calls.is_empty() {
+                    // No function calls. Before treating this as the final
+                    // response, check whether the model emitted code that the
+                    // agent should run.
+                    #[cfg(feature = "code-exec")]
+                    if let Some(executor) = me.code_executor.as_ref() {
+                        let code_parts = extract_executable_code(&event);
+                        if !code_parts.is_empty() {
+                            yield event.clone();
+                            let mut result_parts: Vec<Part> = Vec::new();
+                            for (lang, code) in &code_parts {
+                                let result = executor
+                                    .execute_code(
+                                        &ctx2,
+                                        crate::code_exec::CodeExecutionInput {
+                                            code: code.clone(),
+                                            language: lang.clone(),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await?;
+                                let outcome = if result.stderr.is_empty() {
+                                    crate::genai_types::part::Outcome::OutcomeOk
+                                } else {
+                                    crate::genai_types::part::Outcome::OutcomeFailed
+                                };
+                                result_parts.push(Part::CodeExecutionResult(
+                                    crate::genai_types::part::CodeExecutionResult {
+                                        outcome,
+                                        output: Some(result.combined_output()),
+                                    },
+                                ));
+                            }
+                            let code_result_event = Event::new(
+                                me.name.clone(),
+                                LlmResponse {
+                                    content: Some(Content { role: Role::Tool, parts: result_parts.clone() }),
+                                    ..Default::default()
+                                },
+                            );
+                            {
+                                let mut sess = ctx2.session.lock();
+                                sess.events.push(code_result_event.clone());
+                            }
+                            yield code_result_event;
+                            // Append code + result into the next turn's contents.
+                            if let Some(c) = event.response.content {
+                                req.contents.push(c);
+                            }
+                            req.contents.push(Content {
+                                role: Role::Tool,
+                                parts: result_parts,
+                            });
+                            continue;
+                        }
+                    }
                     // Final response.
                     yield event;
                     return;
@@ -141,6 +199,7 @@ impl BaseAgent for LlmAgent {
                 let mut tool_responses = Vec::with_capacity(calls.len());
                 let mut transfer: Option<String> = None;
                 let mut escalate = false;
+                let mut long_running_any = false;
                 for fc in &calls {
                     let tool = req
                         .tools_dict
@@ -153,17 +212,32 @@ impl BaseAgent for LlmAgent {
                     if let Some(id) = &fc.id {
                         tctx.function_call_id = Some(id.clone());
                     }
-                    let result = tool.run(fc.args.clone(), &mut tctx).await;
-                    let value = match result {
-                        Ok(v) => v,
-                        Err(e) => serde_json::json!({"error": e.to_string()}),
-                    };
+
+                    // Resolve auth before dispatch, if the tool declared a config.
+                    let (auth_pending, value) = resolve_auth_and_run(
+                        tool.as_ref(),
+                        fc.args.clone(),
+                        &mut tctx,
+                    )
+                    .await?;
+
                     if let Some(t) = tctx.transfer_to_agent.take() {
                         if !me.disable_transfer { transfer = Some(t); }
                     }
                     if tctx.escalate { escalate = true; }
+                    let will_continue = if tool.is_long_running() || tctx.long_running {
+                        long_running_any = true;
+                        Some(true)
+                    } else if auth_pending {
+                        // Bubble the pending auth response back via will_continue
+                        // so the caller knows to resume after consent.
+                        long_running_any = true;
+                        Some(true)
+                    } else {
+                        None
+                    };
                     tool_responses.push(
-                        FunctionResponse { id: fc.id.clone(), name: fc.name.clone(), response: value, will_continue: None, scheduling: None }
+                        FunctionResponse { id: fc.id.clone(), name: fc.name.clone(), response: value, will_continue, scheduling: None }
                     );
                 }
 
@@ -192,6 +266,12 @@ impl BaseAgent for LlmAgent {
                     esc.invocation_id = ctx2.invocation_id.clone();
                     esc.actions.escalate = Some(true);
                     yield esc;
+                    return;
+                }
+                if long_running_any {
+                    // Either a long-running tool returned a handle, or a tool
+                    // needs interactive consent. Stop the loop and let the
+                    // caller resume on a follow-up invocation.
                     return;
                 }
 
@@ -293,6 +373,80 @@ fn function_response_event(
     }
 }
 
+/// Extract `(language, code)` from any `ExecutableCode` parts in the event.
+#[cfg(feature = "code-exec")]
+fn extract_executable_code(event: &Event) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(c) = event.response.content.as_ref() {
+        for p in &c.parts {
+            if let Part::ExecutableCode(ec) = p {
+                let lang = ec.language.to_lowercase();
+                out.push((lang, ec.code.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Resolve auth (if the tool declared a config), inject the credential into
+/// `tctx`, and dispatch the tool. Returns `(auth_pending, response_value)`.
+///
+/// When auth is enabled (`feature = "auth"`):
+/// - If the credential resolves cleanly → injects it and calls `tool.run`.
+/// - If the tool needs interactive consent → returns
+///   `(true, AuthConfig-as-JSON)` *without* calling `tool.run`. The agent
+///   surfaces this as a `FunctionResponse` with the synthetic
+///   `adk_request_credential` semantics so the caller can drive the OAuth2
+///   redirect and resubmit.
+/// - If the tool's config is misconfigured → returns an error JSON.
+///
+/// When `feature = "auth"` is off, `auth_config()` is `None` for every
+/// tool so this just dispatches.
+async fn resolve_auth_and_run(
+    tool: &dyn DynTool,
+    args: serde_json::Value,
+    tctx: &mut ToolContext,
+) -> Result<(bool, serde_json::Value)> {
+    #[cfg(feature = "auth")]
+    {
+        if let Some(cfg) = tool.auth_config() {
+            let mgr = crate::auth::CredentialManager::new(cfg.clone());
+            let credentials = tctx.invocation.credential_service.clone();
+            let outcome = mgr
+                .resolve(
+                    &tctx.invocation.app_name,
+                    &tctx.invocation.user_id,
+                    credentials.as_deref(),
+                )
+                .await?;
+            match outcome {
+                crate::auth::ResolveOutcome::Ready(cred) => {
+                    tctx.auth_credential = Some(cred);
+                }
+                crate::auth::ResolveOutcome::NeedsUserConsent(pending) => {
+                    // Defer: don't call the tool. The caller resubmits a
+                    // FunctionResponse(name="adk_request_credential", ...)
+                    // with the exchanged credential filled in; the next
+                    // invocation absorbs it via AuthPreprocessor.
+                    let value = serde_json::to_value(&pending).unwrap_or(serde_json::Value::Null);
+                    return Ok((true, value));
+                }
+                crate::auth::ResolveOutcome::Misconfigured(msg) => {
+                    return Ok((false, serde_json::json!({"error": msg})));
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "auth"))]
+    let _ = tool.auth_config(); // suppress unused-trait-method warning
+
+    let value = match tool.run(args, tctx).await {
+        Ok(v) => v,
+        Err(e) => serde_json::json!({"error": e.to_string()}),
+    };
+    Ok((false, value))
+}
+
 /// Builder for [`LlmAgent`].
 #[derive(Default)]
 pub struct LlmAgentBuilder {
@@ -305,6 +459,8 @@ pub struct LlmAgentBuilder {
     sub_agents: Vec<Arc<dyn BaseAgent>>,
     disable_transfer: bool,
     max_iterations: Option<u32>,
+    #[cfg(feature = "code-exec")]
+    code_executor: Option<Arc<dyn crate::code_exec::CodeExecutor>>,
 }
 
 impl LlmAgentBuilder {
@@ -386,6 +542,16 @@ impl LlmAgentBuilder {
         self
     }
 
+    /// Attach a [`crate::code_exec::CodeExecutor`]. When set, the agent will
+    /// extract `ExecutableCode` parts from each LLM response and dispatch
+    /// them to the executor, feeding back `CodeExecutionResult` parts.
+    #[cfg(feature = "code-exec")]
+    #[must_use]
+    pub fn code_executor(mut self, ex: Arc<dyn crate::code_exec::CodeExecutor>) -> Self {
+        self.code_executor = Some(ex);
+        self
+    }
+
     /// Build.
     pub fn build(self) -> Result<LlmAgent> {
         let model = self
@@ -404,6 +570,8 @@ impl LlmAgentBuilder {
             sub_agents: self.sub_agents,
             disable_transfer: self.disable_transfer,
             max_iterations: self.max_iterations.unwrap_or(16),
+            #[cfg(feature = "code-exec")]
+            code_executor: self.code_executor,
         })
     }
 }
