@@ -63,22 +63,35 @@ pub trait SessionService: Send + Sync + std::fmt::Debug + 'static {
     /// The default impl handles state-delta application (including
     /// `temp:` trimming) and updates `last_update_time`. Backends with
     /// transactional semantics may override.
-    async fn append_event(&self, session: &mut Session, mut event: Event) -> Result<Event> {
+    async fn append_event(&self, session: &mut Session, event: Event) -> Result<Event> {
+        let event = apply_event_to_session(session, event);
+        Ok(event)
+    }
+
+    /// Race-free read-modify-write through an `Arc<Mutex<Session>>`.
+    ///
+    /// The agent + runner both hold a live `Arc<Mutex<Session>>` and used to
+    /// do `let mut clone = lock.lock().clone(); ...; service.append_event(&mut
+    /// clone, ev).await?; *lock.lock() = clone;` — two separate locks, and any
+    /// concurrent mutation between them is silently overwritten (catastrophic
+    /// for `ParallelAgent`). The default impl applies the state delta + pushes
+    /// the event under a single short critical section (no `.await` while
+    /// holding the lock), and **does not call into the backend** — it's
+    /// intended for in-memory-only flows. Backends that need durable
+    /// persistence (SQL etc.) override and combine the in-memory apply with
+    /// their own atomic write.
+    async fn append_event_locked(
+        &self,
+        session_lock: &std::sync::Arc<parking_lot::Mutex<Session>>,
+        event: Event,
+    ) -> Result<Event> {
         if event.partial == Some(true) {
             return Ok(event);
         }
-        // Apply temp state to in-memory session BEFORE trimming so subsequent
-        // agents in the same invocation can still read it, then trim the
-        // delta so it isn't persisted.
-        for (k, v) in &event.actions.state_delta {
-            if crate::core::state::StateScope::of(k) == crate::core::state::StateScope::Temp {
-                session.state.set(k.clone(), v.clone());
-            }
-        }
-        event.actions.state_delta = State::trim_temp_keys(&event.actions.state_delta);
-        session.state.apply(&event.actions.state_delta);
-        session.last_update_time = crate::core::session::now_secs();
-        session.events.push(event.clone());
+        let event = {
+            let mut sess = session_lock.lock();
+            apply_event_to_session(&mut sess, event)
+        };
         Ok(event)
     }
 
@@ -86,6 +99,26 @@ pub trait SessionService: Send + Sync + std::fmt::Debug + 'static {
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
+}
+
+/// Apply `event` to `session` in place: temp-state propagation, state-delta
+/// trim + apply, `last_update_time` bump, and push to `session.events`.
+/// Returns the (possibly delta-trimmed) event. Pure synchronous; safe to
+/// call under a `parking_lot::Mutex` guard.
+pub fn apply_event_to_session(session: &mut Session, mut event: Event) -> Event {
+    if event.partial == Some(true) {
+        return event;
+    }
+    for (k, v) in &event.actions.state_delta {
+        if crate::core::state::StateScope::of(k) == crate::core::state::StateScope::Temp {
+            session.state.set(k.clone(), v.clone());
+        }
+    }
+    event.actions.state_delta = State::trim_temp_keys(&event.actions.state_delta);
+    session.state.apply(&event.actions.state_delta);
+    session.last_update_time = crate::core::session::now_secs();
+    session.events.push(event.clone());
+    event
 }
 
 /// Service for storing and fetching versioned artifacts.

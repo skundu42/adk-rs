@@ -11,16 +11,18 @@
 //! - `--network=none` — no outbound network
 //! - `--read-only` root filesystem
 //! - `--rm` — auto-deletes on exit
-//! - SIGKILL'd by docker after the configured timeout
-//!
-//! For tests that require a real Docker daemon, set
-//! `ADK_RS_DOCKER_TESTS=1`. Tests are otherwise `#[ignore]`d.
+//! - explicit `--name <id>` so the daemon-side container can be killed even
+//!   if the parent `docker` CLI dies mid-run
+//! - SIGKILL'd via `docker kill <id>` on wall-clock timeout (the daemon owns
+//!   the container, not the CLI — `kill_on_drop(true)` on the CLI handle is
+//!   not sufficient on its own)
 
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 use crate::code_exec::CodeExecutor;
 use crate::code_exec::types::{CodeExecutionInput, CodeExecutionResult};
@@ -75,6 +77,18 @@ impl ContainerCodeExecutor {
     }
 }
 
+/// Best-effort cleanup: kill and remove the named container. Used on timeout
+/// (and as a defence-in-depth in case `--rm` didn't fire). Failures are
+/// swallowed — we've already returned a timeout error to the caller and the
+/// kill is opportunistic.
+async fn kill_container(name: &str) {
+    let _ = Command::new("docker").args(["kill", name]).output().await;
+    let _ = Command::new("docker")
+        .args(["rm", "-f", name])
+        .output()
+        .await;
+}
+
 #[async_trait]
 impl CodeExecutor for ContainerCodeExecutor {
     fn timeout(&self) -> Option<Duration> {
@@ -86,6 +100,11 @@ impl CodeExecutor for ContainerCodeExecutor {
         _ctx: &InvocationContext,
         input: CodeExecutionInput,
     ) -> Result<CodeExecutionResult> {
+        // Generate a stable name so the daemon-side container can be killed
+        // on timeout. The `docker` CLI's `kill_on_drop` only kills the CLI
+        // process — not the container.
+        let container_name = format!("adk-rs-codex-{}", Uuid::new_v4());
+
         let mut cmd = Command::new("docker");
         cmd.arg("run")
             .arg("--rm")
@@ -93,6 +112,8 @@ impl CodeExecutor for ContainerCodeExecutor {
             .arg("--network=none")
             .arg("--read-only")
             .arg("--tmpfs=/tmp:rw,exec,size=64m")
+            .arg("--name")
+            .arg(&container_name)
             .arg(&self.image);
         for a in &self.argv {
             cmd.arg(a);
@@ -106,12 +127,19 @@ impl CodeExecutor for ContainerCodeExecutor {
             .spawn()
             .map_err(|e| Error::other(format!("docker run spawn: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(input.code.as_bytes())
-                .await
-                .map_err(|e| Error::other(format!("docker stdin: {e}")))?;
+            // Swallow `BrokenPipe` — the child may exit before consuming all
+            // input (e.g. parse error on the first line). We still want to
+            // read whatever stderr/stdout it produced.
+            if let Err(e) = stdin.write_all(input.code.as_bytes()).await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    // Stop and clean up on a real I/O error.
+                    kill_container(&container_name).await;
+                    return Err(Error::other(format!("docker stdin: {e}")));
+                }
+            }
             drop(stdin);
         }
+
         let wait = async {
             child
                 .wait_with_output()
@@ -121,13 +149,16 @@ impl CodeExecutor for ContainerCodeExecutor {
         let output = match timeout(self.timeout, wait).await {
             Ok(r) => r?,
             Err(_) => {
+                // Daemon-side container is still running. Kill it explicitly.
+                kill_container(&container_name).await;
                 return Ok(CodeExecutionResult {
                     stdout: String::new(),
                     stderr: format!(
-                        "container execution timed out after {}s",
+                        "container '{container_name}' execution timed out after {}s",
                         self.timeout.as_secs()
                     ),
                     output_files: Vec::new(),
+                    exit_code: None,
                 });
             }
         };
@@ -135,6 +166,7 @@ impl CodeExecutor for ContainerCodeExecutor {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             output_files: Vec::new(),
+            exit_code: output.status.code(),
         })
     }
 }

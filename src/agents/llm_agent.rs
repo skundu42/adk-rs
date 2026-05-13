@@ -162,28 +162,63 @@ impl BaseAgent for LlmAgent {
                         if !code_parts.is_empty() {
                             yield event.clone();
                             let mut result_parts: Vec<Part> = Vec::new();
+                            let max_attempts = executor.error_retry_attempts().max(1);
                             for (lang, code) in &code_parts {
-                                let result = executor
-                                    .execute_code(
-                                        &ctx2,
-                                        crate::code_exec::CodeExecutionInput {
-                                            code: code.clone(),
-                                            language: lang.clone(),
-                                            ..Default::default()
+                                let mut last_err: Option<crate::error::Error> = None;
+                                let mut delivered = false;
+                                for _attempt in 0..max_attempts {
+                                    match executor
+                                        .execute_code(
+                                            &ctx2,
+                                            crate::code_exec::CodeExecutionInput {
+                                                code: code.clone(),
+                                                language: lang.clone(),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        Ok(result) => {
+                                            // Outcome is driven by the child's
+                                            // exit code, not by stderr presence
+                                            // (stderr is routine for warnings).
+                                            let outcome = if result.is_success() {
+                                                crate::genai_types::part::Outcome::OutcomeOk
+                                            } else {
+                                                crate::genai_types::part::Outcome::OutcomeFailed
+                                            };
+                                            result_parts.push(Part::CodeExecutionResult(
+                                                crate::genai_types::part::CodeExecutionResult {
+                                                    outcome,
+                                                    output: Some(result.combined_output()),
+                                                },
+                                            ));
+                                            delivered = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "code executor error (will retry): {e}"
+                                            );
+                                            last_err = Some(e);
+                                        }
+                                    }
+                                }
+                                if !delivered {
+                                    // Out of retries — surface as a failed
+                                    // CodeExecutionResult rather than aborting
+                                    // the whole agent run.
+                                    let msg = last_err
+                                        .map(|e| e.to_string())
+                                        .unwrap_or_else(|| "code executor failed".into());
+                                    result_parts.push(Part::CodeExecutionResult(
+                                        crate::genai_types::part::CodeExecutionResult {
+                                            outcome:
+                                                crate::genai_types::part::Outcome::OutcomeFailed,
+                                            output: Some(msg),
                                         },
-                                    )
-                                    .await?;
-                                let outcome = if result.stderr.is_empty() {
-                                    crate::genai_types::part::Outcome::OutcomeOk
-                                } else {
-                                    crate::genai_types::part::Outcome::OutcomeFailed
-                                };
-                                result_parts.push(Part::CodeExecutionResult(
-                                    crate::genai_types::part::CodeExecutionResult {
-                                        outcome,
-                                        output: Some(result.combined_output()),
-                                    },
-                                ));
+                                    ));
+                                }
                             }
                             let code_result_event = Event::new(
                                 me.name.clone(),

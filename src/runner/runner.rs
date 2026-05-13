@@ -135,11 +135,11 @@ impl Runner {
             );
         }
 
-        let mut sess_clone = invocation.session.lock().clone();
+        // Atomic read-modify-write through the live Mutex — prevents
+        // concurrent writers from being silently overwritten.
         self.session_service
-            .append_event(&mut sess_clone, user_ev.clone())
+            .append_event_locked(&invocation.session, user_ev.clone())
             .await?;
-        *invocation.session.lock() = sess_clone;
 
         self.plugins.before_run(&invocation).await?;
 
@@ -157,24 +157,33 @@ impl Runner {
                                 // Persist non-partial, non-user events via the service.
                                 // The agent already pushes to session.events; service mirrors.
                                 if ev.partial != Some(true) && ev.author != "user" {
-                                    let mut sess_clone = inv.session.lock().clone();
-                                    // Note: the agent already appended this event in-memory;
-                                    // pop the last one so append_event doesn't duplicate it.
-                                    let already_in = sess_clone
-                                        .events
-                                        .last()
-                                        .map(|e| e.id == ev.id)
-                                        .unwrap_or(false);
-                                    if already_in {
-                                        sess_clone.events.pop();
+                                    // Atomic: hold the live lock for the
+                                    // state-delta apply + event push. The
+                                    // agent already pushed this event to the
+                                    // in-memory session — remove the matching
+                                    // id under the same lock so we don't
+                                    // duplicate it. Use id-search (not
+                                    // last-only) to remain correct when
+                                    // parallel sub-agents interleave pushes.
+                                    {
+                                        let mut sess = inv.session.lock();
+                                        if let Some(pos) =
+                                            sess.events.iter().rposition(|e| e.id == ev.id)
+                                        {
+                                            sess.events.remove(pos);
+                                        }
                                     }
-                                    if let Err(e) = svc.append_event(&mut sess_clone, ev.clone()).await {
-                                        if let Err(after_err) = plugins.after_run(&inv, Some(&e)).await {
+                                    if let Err(e) = svc
+                                        .append_event_locked(&inv.session, ev.clone())
+                                        .await
+                                    {
+                                        if let Err(after_err) =
+                                            plugins.after_run(&inv, Some(&e)).await
+                                        {
                                             error!("plugin after_run failed: {after_err}");
                                         }
                                         Err(e)?;
                                     }
-                                    *inv.session.lock() = sess_clone;
                                 }
                                 if let Err(e) = plugins.on_event(&inv, &ev).await {
                                     if let Err(after_err) = plugins.after_run(&inv, Some(&e)).await {

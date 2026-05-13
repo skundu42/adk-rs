@@ -264,4 +264,29 @@ impl SessionService for SqlSessionService {
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
         Ok(event)
     }
+
+    /// Race-free read-modify-write. Mutates the live session under one lock
+    /// then writes through to PostgreSQL using a snapshot. The SQL write may
+    /// briefly trail the in-memory view; on reload, `events` is authoritative
+    /// (each INSERT is independent) while the aggregate `state` is
+    /// last-writer-wins.
+    async fn append_event_locked(
+        &self,
+        session_lock: &std::sync::Arc<parking_lot::Mutex<Session>>,
+        event: Event,
+    ) -> Result<Event> {
+        if event.partial == Some(true) {
+            return Ok(event);
+        }
+        let (event, mut snapshot) = {
+            let mut sess = session_lock.lock();
+            let event = crate::core::services::apply_event_to_session(&mut sess, event);
+            (event, sess.clone())
+        };
+        if snapshot.events.last().map(|e| &e.id) == Some(&event.id) {
+            snapshot.events.pop();
+        }
+        let _ = self.append_event(&mut snapshot, event.clone()).await?;
+        Ok(event)
+    }
 }

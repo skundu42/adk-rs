@@ -41,7 +41,7 @@ pub use exchanger::{
 #[cfg(feature = "auth")]
 pub use handler::AuthHandler;
 #[cfg(feature = "auth")]
-pub use manager::{CredentialManager, ResolveOutcome};
+pub use manager::{ConsentRequest, CredentialManager, ResolveOutcome};
 #[cfg(feature = "auth")]
 pub use preprocessor::{AuthPreprocessor, PreprocessOutcome};
 #[cfg(feature = "auth")]

@@ -120,6 +120,75 @@ impl SessionService for InMemorySessionService {
         }
         Ok(event)
     }
+
+    /// Race-free read-modify-write. Applies the event in-memory under the
+    /// live lock, then mirrors the post-apply session into the internal
+    /// store. The whole operation is atomic from the perspective of
+    /// concurrent writers on the same `Arc<Mutex<Session>>`.
+    async fn append_event_locked(
+        &self,
+        session_lock: &Arc<Mutex<Session>>,
+        event: Event,
+    ) -> Result<Event> {
+        if event.partial == Some(true) {
+            return Ok(event);
+        }
+        // Critical section: apply delta + push event + snapshot for mirroring.
+        let (event, key, snapshot) = {
+            let mut sess = session_lock.lock();
+            let event = crate::core::services::apply_event_to_session(&mut sess, event);
+            let key = Self::key(&sess.app_name, &sess.user_id, &sess.id);
+            let snapshot = sess.clone();
+            (event, key, snapshot)
+        };
+        // Mirror under a separate, finer-grained lock on the internal slot.
+        if let Some(arc) = self.sessions.get(&key) {
+            *arc.lock() = snapshot;
+        } else {
+            self.sessions.insert(key, Arc::new(Mutex::new(snapshot)));
+        }
+        Ok(event)
+    }
+}
+
+#[cfg(test)]
+mod race_tests {
+    use super::*;
+    use crate::core::LlmResponse;
+
+    /// Bug fix v0.2.1 #2 (session clone-overwrite race): N concurrent writers
+    /// against the same `Arc<Mutex<Session>>` must not lose events. Before
+    /// the fix this test reliably dropped writes because of the `clone() ...
+    /// await ... overwrite` anti-pattern in callers.
+    #[tokio::test]
+    async fn concurrent_append_event_locked_preserves_every_event() {
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let s = svc.create_session("app", "u", None, None).await.unwrap();
+        let lock = Arc::new(Mutex::new(s));
+
+        const N: usize = 64;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let svc_c = svc.clone();
+            let lock_c = lock.clone();
+            handles.push(tokio::spawn(async move {
+                let ev = Event::new(format!("writer-{i}"), LlmResponse::default());
+                svc_c.append_event_locked(&lock_c, ev).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let final_session = lock.lock();
+        assert_eq!(
+            final_session.events.len(),
+            N,
+            "every concurrent writer's event must survive (got {} of {})",
+            final_session.events.len(),
+            N
+        );
+    }
 }
 
 fn apply_filter(mut s: Session, cfg: &GetSessionConfig) -> Session {

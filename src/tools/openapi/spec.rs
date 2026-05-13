@@ -240,11 +240,56 @@ fn resolve_schema_ref<'a>(
 
 fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<Schema> {
     use openapiv3::Type;
-    let schema = match &s.schema_kind {
+    let mut schema = match &s.schema_kind {
         SchemaKind::Type(t) => match t {
-            Type::String(_) => Schema::string(),
-            Type::Number(_) => Schema::number(),
-            Type::Integer(_) => Schema::integer(),
+            Type::String(spec) => {
+                let mut out = Schema::string();
+                if !spec.enumeration.is_empty() {
+                    out.enum_values =
+                        Some(spec.enumeration.iter().filter_map(|v| v.clone()).collect());
+                }
+                if let Some(p) = &spec.pattern {
+                    out.pattern = Some(p.clone());
+                }
+                if let openapiv3::VariantOrUnknownOrEmpty::Item(fmt) = &spec.format {
+                    out.format = Some(string_format_str(fmt).to_string());
+                } else if let openapiv3::VariantOrUnknownOrEmpty::Unknown(s) = &spec.format {
+                    out.format = Some(s.clone());
+                }
+                if let Some(min) = spec.min_length {
+                    out.min_length = Some(min as u64);
+                }
+                if let Some(max) = spec.max_length {
+                    out.max_length = Some(max as u64);
+                }
+                out
+            }
+            Type::Number(spec) => {
+                let mut out = Schema::number();
+                if let openapiv3::VariantOrUnknownOrEmpty::Item(fmt) = &spec.format {
+                    out.format = Some(number_format_str(fmt).to_string());
+                }
+                if let Some(v) = spec.minimum {
+                    out.minimum = Some(v);
+                }
+                if let Some(v) = spec.maximum {
+                    out.maximum = Some(v);
+                }
+                out
+            }
+            Type::Integer(spec) => {
+                let mut out = Schema::integer();
+                if let openapiv3::VariantOrUnknownOrEmpty::Item(fmt) = &spec.format {
+                    out.format = Some(integer_format_str(fmt).to_string());
+                }
+                if let Some(v) = spec.minimum {
+                    out.minimum = Some(v as f64);
+                }
+                if let Some(v) = spec.maximum {
+                    out.maximum = Some(v as f64);
+                }
+                out
+            }
             Type::Boolean(_) => Schema::boolean(),
             Type::Array(arr) => {
                 let item = arr
@@ -253,22 +298,142 @@ fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<
                     .map(|i| schema_or_ref_to_schema(api, &i.clone().unbox()))
                     .transpose()?
                     .unwrap_or_else(Schema::string);
-                Schema::array(item)
+                let mut out = Schema::array(item);
+                if let Some(n) = arr.min_items {
+                    out.min_items = Some(n as u64);
+                }
+                if let Some(n) = arr.max_items {
+                    out.max_items = Some(n as u64);
+                }
+                out
             }
             Type::Object(obj) => {
-                let mut s = Schema::object();
+                let mut out = Schema::object();
                 for (k, v) in &obj.properties {
-                    s = s.property(k.clone(), schema_or_ref_to_schema(api, &v.clone().unbox())?);
+                    out =
+                        out.property(k.clone(), schema_or_ref_to_schema(api, &v.clone().unbox())?);
                 }
                 for r in &obj.required {
-                    s = s.require(r.clone());
+                    out = out.require(r.clone());
                 }
-                s
+                out
             }
         },
-        _ => Schema::string(),
+        SchemaKind::AllOf { all_of } => merge_all_of(api, all_of)?,
+        SchemaKind::OneOf { one_of } | SchemaKind::AnyOf { any_of: one_of } => {
+            flatten_one_of(api, one_of)?
+        }
+        SchemaKind::Not { .. } => Schema::string(), // best-effort
+        SchemaKind::Any(_) => Schema::object(),     // free-form
     };
+
+    // Propagate common metadata from `data` (nullable / description / default
+    // / title). `description` is set by the caller from ParameterData for path
+    // /query/header params; here we fill in for object properties.
+    if s.schema_data.nullable {
+        schema.nullable = Some(true);
+    }
+    if let Some(d) = &s.schema_data.description {
+        if schema.description.is_none() {
+            schema.description = Some(d.clone());
+        }
+    }
+    if let Some(t) = &s.schema_data.title {
+        schema.title = Some(t.clone());
+    }
+    if let Some(def) = &s.schema_data.default {
+        schema.default = Some(def.clone());
+    }
+    if let Some(ex) = &s.schema_data.example {
+        schema.example = Some(ex.clone());
+    }
     Ok(schema)
+}
+
+/// Merge a list of `allOf` sub-schemas into one. Properties union, required
+/// union; conflicting scalar types degrade to the first one. Common pattern:
+/// `allOf: [$ref to BaseModel, { type: object, properties: {...} }]` →
+/// flattened single object schema.
+fn merge_all_of(api: &OpenAPI, list: &[ReferenceOr<openapiv3::Schema>]) -> Result<Schema> {
+    let mut out = Schema::object();
+    for s in list {
+        let part = schema_or_ref_to_schema(api, s)?;
+        // If this part is an object, merge its properties + required.
+        if part.r#type == Some(crate::genai_types::SchemaType::Object) {
+            for (k, v) in part.properties {
+                out = out.property(k, v);
+            }
+            for r in part.required {
+                if !out.required.contains(&r) {
+                    out = out.require(r);
+                }
+            }
+        } else if out.properties.is_empty()
+            && out.r#type == Some(crate::genai_types::SchemaType::Object)
+        {
+            // No object props yet — adopt this non-object sub-schema's type.
+            // (Rare: allOf with a primitive base type.)
+            out.r#type = part.r#type;
+            out.format = part.format.or(out.format);
+        }
+        // Carry description / nullable from the first sub-schema that sets them.
+        if out.description.is_none() {
+            out.description = part.description;
+        }
+        if out.nullable.is_none() {
+            out.nullable = part.nullable;
+        }
+    }
+    Ok(out)
+}
+
+/// Pick the first object-typed sub-schema; falls back to the first non-object
+/// sub-schema; falls back to a free-form object. `oneOf` and `anyOf` are
+/// indistinguishable for our purposes since the LLM can't pick which arm to
+/// satisfy — we settle on the most permissive shape we can express.
+fn flatten_one_of(api: &OpenAPI, list: &[ReferenceOr<openapiv3::Schema>]) -> Result<Schema> {
+    let parts: Vec<Schema> = list
+        .iter()
+        .map(|s| schema_or_ref_to_schema(api, s))
+        .collect::<Result<_>>()?;
+    if let Some(obj) = parts
+        .iter()
+        .find(|p| p.r#type == Some(crate::genai_types::SchemaType::Object))
+    {
+        return Ok(obj.clone());
+    }
+    if let Some(first) = parts.into_iter().next() {
+        return Ok(first);
+    }
+    Ok(Schema::object())
+}
+
+/// Render `openapiv3::StringFormat` to the JSON-Schema format string.
+fn string_format_str(f: &openapiv3::StringFormat) -> &'static str {
+    use openapiv3::StringFormat as F;
+    match f {
+        F::Date => "date",
+        F::DateTime => "date-time",
+        F::Password => "password",
+        F::Byte => "byte",
+        F::Binary => "binary",
+    }
+}
+
+fn number_format_str(f: &openapiv3::NumberFormat) -> &'static str {
+    use openapiv3::NumberFormat as F;
+    match f {
+        F::Float => "float",
+        F::Double => "double",
+    }
+}
+
+fn integer_format_str(f: &openapiv3::IntegerFormat) -> &'static str {
+    use openapiv3::IntegerFormat as F;
+    match f {
+        F::Int32 => "int32",
+        F::Int64 => "int64",
+    }
 }
 
 fn collect_security_schemes(api: &OpenAPI) -> IndexMap<String, AuthScheme> {
