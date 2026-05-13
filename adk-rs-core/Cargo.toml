@@ -1,0 +1,45 @@
+[package]
+name = "adk-rs-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core types and service traits for adk-rs."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+testing = []
+
+[dependencies]
+adk-rs-error.workspace = true
+adk-rs-genai-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+indexmap.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+async-stream.workspace = true
+pin-project-lite.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+similar-asserts.workspace = true

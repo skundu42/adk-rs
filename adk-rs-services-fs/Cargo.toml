@@ -1,0 +1,30 @@
+[package]
+name = "adk-rs-services-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Filesystem-backed ArtifactService for adk-rs."
+
+[lints]
+workspace = true
+
+[dependencies]
+adk-rs-error.workspace = true
+adk-rs-genai-types.workspace = true
+adk-rs-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true

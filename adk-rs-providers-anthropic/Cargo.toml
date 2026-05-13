@@ -1,0 +1,36 @@
+[package]
+name = "adk-rs-providers-anthropic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Anthropic Claude provider for adk-rs."
+
+[lints]
+workspace = true
+
+[dependencies]
+adk-rs-error.workspace = true
+adk-rs-genai-types.workspace = true
+adk-rs-core.workspace = true
+async-trait.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+eventsource-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+similar-asserts.workspace = true
+wiremock.workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "adk-rs-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Evaluation framework for adk-rs (eval sets, trajectory + LLM-judge metrics)."
+
+[lints]
+workspace = true
+
+[dependencies]
+adk-rs-error.workspace = true
+adk-rs-genai-types.workspace = true
+adk-rs-core.workspace = true
+adk-rs-agents.workspace = true
+adk-rs-runner.workspace = true
+adk-rs-services-mem.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+
+[dev-dependencies]
+adk-rs-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+similar-asserts.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+.env
+.env.local
+*.log
+/coverage
+*.profraw
+*.profdata
+/adk-python-src-code
