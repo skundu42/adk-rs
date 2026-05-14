@@ -72,7 +72,6 @@ fn doc_comment(attrs: &[syn::Attribute]) -> String {
 
 #[proc_macro_attribute]
 /// `#[adk::tool]` — see crate docs.
-#[allow(clippy::indexing_slicing)] // `inputs.len() != 2` is checked first
 pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let f = parse_macro_input!(item as ItemFn);
     let vis = &f.vis;
@@ -89,17 +88,18 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Inspect arguments: expect (args: ArgsType, ctx: &mut ToolContext)
-    let inputs: Vec<&FnArg> = f.sig.inputs.iter().collect();
-    if inputs.len() != 2 {
+    let mut inputs = f.sig.inputs.iter();
+    let (Some(arg_input), Some(ctx_input), None) = (inputs.next(), inputs.next(), inputs.next())
+    else {
         return TokenStream::from(quote! {
             compile_error!("#[adk_rs::tool] requires exactly two args: (args: T, ctx: &mut ToolContext)");
         });
-    }
+    };
     let PatType {
         pat: arg_pat,
         ty: arg_ty,
         ..
-    } = match inputs[0] {
+    } = match arg_input {
         FnArg::Typed(p) => p.clone(),
         FnArg::Receiver(_) => {
             return TokenStream::from(quote! {
@@ -120,7 +120,7 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pat: ctx_pat,
         ty: _ctx_ty,
         ..
-    } = match inputs[1] {
+    } = match ctx_input {
         FnArg::Typed(p) => p.clone(),
         FnArg::Receiver(_) => {
             return TokenStream::from(quote! {
