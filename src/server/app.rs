@@ -213,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn serve_refuses_non_loopback_without_auth_or_override() {
         let state = empty_state(None);
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let err = serve(addr, state).await.unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -224,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_allows_non_loopback_when_auth_set() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         validate_bind_policy(addr, true, &ServeOptions::default()).unwrap();
     }
 

@@ -9,8 +9,8 @@
 //!     - [`method::MESSAGE_SEND`] — synchronous: create a task, run the
 //!       agent to completion, return the final [`Task`].
 //!     - [`method::MESSAGE_STREAM`] — SSE: same as above but streams every
-//!       intermediate [`TaskStatusUpdateEvent`] / [`TaskArtifactUpdateEvent`]
-//!       to the caller.
+//!       intermediate [`crate::a2a::types::TaskStatusUpdateEvent`] /
+//!       [`crate::a2a::types::TaskArtifactUpdateEvent`] to the caller.
 //!     - [`method::TASKS_GET`] — return a task by id.
 //!     - [`method::TASKS_CANCEL`] — cancel a non-terminal task.
 //!     - [`method::TASKS_RESUBSCRIBE`] — re-attach to a task's SSE channel.
@@ -1304,7 +1304,7 @@ mod tests {
     async fn serve_refuses_non_loopback_without_auth() {
         use std::net::{IpAddr, Ipv4Addr};
         let st = state(build_runner());
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let err = serve(addr, st).await.unwrap_err();
         assert!(err.to_string().contains("non-loopback"));
     }

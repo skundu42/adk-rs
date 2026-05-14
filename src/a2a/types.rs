@@ -230,17 +230,12 @@ impl Message {
 /// Discriminator for [`Message`]. Always `"message"` — exists so the
 /// streaming SSE payloads (`Task`, `Message`, `*UpdateEvent`) can share a
 /// single union shape on the wire.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum MessageKind {
     /// The only valid variant.
+    #[default]
     Message,
-}
-
-impl Default for MessageKind {
-    fn default() -> Self {
-        Self::Message
-    }
 }
 
 /// `Message.role` — `"user"` for caller-originated content,
@@ -352,17 +347,12 @@ pub struct Task {
 }
 
 /// Discriminator for [`Task`]. Always `"task"`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskKind {
     /// The only valid variant.
+    #[default]
     Task,
-}
-
-impl Default for TaskKind {
-    fn default() -> Self {
-        Self::Task
-    }
 }
 
 /// `Task.status` — current state plus an optional message describing the
@@ -471,17 +461,12 @@ pub struct TaskStatusUpdateEvent {
 }
 
 /// Discriminator for [`TaskStatusUpdateEvent`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatusUpdateKind {
     /// The only valid variant.
+    #[default]
     StatusUpdate,
-}
-
-impl Default for StatusUpdateKind {
-    fn default() -> Self {
-        Self::StatusUpdate
-    }
 }
 
 /// Streaming notification — task gained (or appended to) an artifact.
@@ -503,17 +488,12 @@ pub struct TaskArtifactUpdateEvent {
 }
 
 /// Discriminator for [`TaskArtifactUpdateEvent`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactUpdateKind {
     /// The only valid variant.
+    #[default]
     ArtifactUpdate,
-}
-
-impl Default for ArtifactUpdateKind {
-    fn default() -> Self {
-        Self::ArtifactUpdate
-    }
 }
 
 /// A streaming SSE result — the `result` field of an [`A2aResponse`] frame

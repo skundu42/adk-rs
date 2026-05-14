@@ -153,10 +153,8 @@ fn content_to_blocks(c: &Content) -> (&'static str, Vec<WireBlock>) {
     let mut out = Vec::new();
     for p in &c.parts {
         match p {
-            Part::Text(t) | Part::Thought(t) => {
-                if !t.is_empty() {
-                    out.push(WireBlock::Text { text: t.clone() });
-                }
+            Part::Text(t) | Part::Thought(t) if !t.is_empty() => {
+                out.push(WireBlock::Text { text: t.clone() });
             }
             Part::FunctionCall(fc) => out.push(WireBlock::ToolUse {
                 id: fc
