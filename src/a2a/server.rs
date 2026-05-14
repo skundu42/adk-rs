@@ -9,8 +9,8 @@
 //!     - [`method::MESSAGE_SEND`] — synchronous: create a task, run the
 //!       agent to completion, return the final [`Task`].
 //!     - [`method::MESSAGE_STREAM`] — SSE: same as above but streams every
-//!       intermediate [`TaskStatusUpdateEvent`] / [`TaskArtifactUpdateEvent`]
-//!       to the caller.
+//!       intermediate [`TaskStatusUpdateEvent`](crate::a2a::TaskStatusUpdateEvent) /
+//!       [`TaskArtifactUpdateEvent`](crate::a2a::TaskArtifactUpdateEvent) to the caller.
 //!     - [`method::TASKS_GET`] — return a task by id.
 //!     - [`method::TASKS_CANCEL`] — cancel a non-terminal task.
 //!     - [`method::TASKS_RESUBSCRIBE`] — re-attach to a task's SSE channel.
