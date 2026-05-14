@@ -59,7 +59,13 @@ impl BaseAgent for LoopAgent {
         let me = self.clone();
         let stream = try_stream! {
             'outer: for _i in 0..me.max_iterations {
+                if ctx.is_cancelled() {
+                    break 'outer;
+                }
                 for sub in &me.sub_agents {
+                    if ctx.is_cancelled() {
+                        break 'outer;
+                    }
                     let mut s = Box::pin(sub.clone().run(ctx.clone()).await?);
                     while let Some(ev) = s.next().await {
                         let ev = ev?;

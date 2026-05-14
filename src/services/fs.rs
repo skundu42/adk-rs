@@ -40,8 +40,16 @@ impl FileArtifactService {
     }
 }
 
+/// Sanitize one path component. Replaces unsafe characters with `_` and —
+/// critically — rewrites dot-only components (`.`, `..`, `...`, ...) to `_`
+/// so that an attacker-controlled `app_name` / `user_id` / `session_id` /
+/// `filename` can't escape the artifact root via `..` segments.
+///
+/// Empty input collapses to `_` for the same reason — `Path::join("")` is
+/// a no-op and would silently merge two adjacent components.
 fn sanitize(s: &str) -> String {
-    s.chars()
+    let mapped: String = s
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') {
                 c
@@ -49,7 +57,11 @@ fn sanitize(s: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if mapped.is_empty() || mapped.chars().all(|c| c == '.') {
+        return "_".to_string();
+    }
+    mapped
 }
 
 #[async_trait]
@@ -222,5 +234,56 @@ mod tests {
         let k = ArtifactKey::new("a/p", "u", "s", "../../oops.txt");
         svc.save_artifact(k.clone(), Part::text("x")).await.unwrap();
         assert!(svc.load_artifact(k, None).await.unwrap().is_some());
+    }
+
+    /// Regression: an attacker-controlled component equal to `..` (or `.`,
+    /// `...`, etc.) used to survive `sanitize` because `.` was on the
+    /// allow-list, and the resulting `Path::join("..")` walked one level out
+    /// of the artifact root. `delete_artifact` reaching `remove_dir_all` on
+    /// that path could blow away unrelated data.
+    #[tokio::test]
+    async fn dotdot_component_cannot_escape_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let svc = FileArtifactService::new(&root);
+
+        for evil in ["..", ".", "...", ""] {
+            // Each evil string is tried in every position.
+            for (a, u, s, f) in [
+                (evil, "u", "s", "f"),
+                ("a", evil, "s", "f"),
+                ("a", "u", evil, "f"),
+                ("a", "u", "s", evil),
+            ] {
+                let k = ArtifactKey::new(a, u, s, f);
+                svc.save_artifact(k.clone(), Part::text("payload"))
+                    .await
+                    .unwrap();
+                let dir = svc.dir(&k);
+                // Every component must live strictly below `root`.
+                let rel = dir.strip_prefix(&root).expect("dir escaped root");
+                for comp in rel.components() {
+                    match comp {
+                        std::path::Component::Normal(s) => {
+                            let s = s.to_string_lossy();
+                            assert_ne!(&*s, "..", "dotdot component {a:?}/{u:?}/{s:?}/{f:?}");
+                            assert_ne!(&*s, ".", "dot component {a:?}/{u:?}/{s:?}/{f:?}");
+                            assert!(!s.is_empty(), "empty component {a:?}/{u:?}/{s:?}/{f:?}");
+                        }
+                        std::path::Component::CurDir | std::path::Component::ParentDir => {
+                            panic!("unsafe component {comp:?} in {dir:?}");
+                        }
+                        _ => {}
+                    }
+                }
+                // delete_artifact may not call remove_dir_all on anything
+                // above `root` — verified implicitly: the dir is strictly
+                // below root, so remove_dir_all stays scoped.
+                svc.delete_artifact(k).await.unwrap();
+            }
+        }
+
+        // The temporary directory itself must still exist after all that.
+        assert!(root.exists(), "artifact root was deleted");
     }
 }

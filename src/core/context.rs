@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::genai_types::Content;
 
+use crate::core::cancel::CancellationToken;
 use crate::core::run_config::RunConfig;
 use crate::core::services::{ArtifactService, CredentialService, MemoryService, SessionService};
 use crate::core::session::Session;
@@ -56,6 +57,12 @@ pub struct InvocationContext {
     pub user_content: Option<Content>,
     /// Counter of LLM calls performed (capped by `RunConfig::max_llm_calls`).
     pub llm_call_count: Arc<Mutex<u32>>,
+    /// Cooperative cancellation flag. Agents check this at safe points and
+    /// short-circuit cleanly when it flips. Flipped by
+    /// [`crate::runner::Runner::cancel`] or by the A2A `tasks/cancel`
+    /// handler — the same token plumbs through to both surfaces so cancels
+    /// initiated from either side reach the in-flight agent.
+    pub cancellation: CancellationToken,
     /// Free-form attribute bag for plugins / agent-specific bookkeeping.
     pub attributes: Arc<Mutex<HashMap<String, Value>>>,
 }
@@ -91,6 +98,14 @@ impl InvocationContext {
         }
         *n += 1;
         Ok(())
+    }
+
+    /// True if [`Self::cancellation`] has been flipped. Agents call this
+    /// at safe points (between iterations of the LLM↔tool loop, between
+    /// sub-agents) to halt cleanly.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
 }
 

@@ -9,7 +9,9 @@ use crate::core::{DynTool, ReadonlyContext};
 use crate::error::Result;
 use crate::tools::Toolset;
 
-use crate::mcp::client::{McpClient, McpStdioParams};
+use crate::mcp::client::McpClient;
+use crate::mcp::http::McpHttpParams;
+use crate::mcp::stdio::McpStdioParams;
 use crate::mcp::tool::McpTool;
 
 /// MCP-backed toolset.
@@ -25,13 +27,22 @@ impl std::fmt::Debug for McpToolset {
 }
 
 impl McpToolset {
-    /// Spawn an MCP server over stdio.
-    pub async fn stdio(params: McpStdioParams) -> Result<Self> {
-        let client = Arc::new(McpClient::spawn(params).await?);
-        Ok(Self {
+    /// Wrap an already-connected client.
+    pub fn from_client(client: Arc<McpClient>) -> Self {
+        Self {
             client,
             cached: tokio::sync::OnceCell::new(),
-        })
+        }
+    }
+
+    /// Spawn an MCP server over stdio.
+    pub async fn stdio(params: McpStdioParams) -> Result<Self> {
+        Ok(Self::from_client(Arc::new(McpClient::spawn(params).await?)))
+    }
+
+    /// Connect to a remote MCP server over streamable HTTP.
+    pub async fn http(params: McpHttpParams) -> Result<Self> {
+        Ok(Self::from_client(Arc::new(McpClient::http(params).await?)))
     }
 }
 

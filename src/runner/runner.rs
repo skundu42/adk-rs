@@ -11,13 +11,51 @@ use tracing::{error, instrument};
 
 use crate::agents::BaseAgent;
 use crate::core::{
-    ArtifactService, CredentialService, Event, EventStream, GetSessionConfig, InvocationContext,
-    InvocationOrigin, MemoryService, RunConfig, Session, SessionService,
+    ArtifactService, CancellationToken, CredentialService, Event, EventStream, GetSessionConfig,
+    InvocationContext, InvocationOrigin, MemoryService, RunConfig, Session, SessionService,
 };
 use crate::error::{Error, Result};
 use crate::genai_types::Content;
 
 use crate::runner::plugin::PluginManager;
+
+/// Handle for an in-flight invocation. Lets the caller observe the
+/// generated `invocation_id`, request cancellation, and consume the agent's
+/// event stream.
+pub struct RunningInvocation {
+    /// Server-assigned invocation id. Stable for the lifetime of the run.
+    pub invocation_id: String,
+    /// Shared cancellation flag. Cloned from
+    /// [`InvocationContext::cancellation`] so flipping it here propagates
+    /// to the running agent.
+    pub cancellation: CancellationToken,
+    /// The agent's event stream.
+    pub events: EventStream<'static>,
+}
+
+impl std::fmt::Debug for RunningInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningInvocation")
+            .field("invocation_id", &self.invocation_id)
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Drops an entry from `Runner::active` when the event stream ends. Lives
+/// inside the `try_stream!` block so the deregistration happens regardless
+/// of how the stream terminates (completion, early `?` return, or caller-
+/// side drop of the boxed stream).
+struct ActiveGuard {
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    invocation_id: String,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.active.lock().remove(&self.invocation_id);
+    }
+}
 
 /// Top-level orchestrator.
 pub struct Runner {
@@ -29,6 +67,12 @@ pub struct Runner {
     credential_service: Option<Arc<dyn CredentialService>>,
     plugins: Arc<PluginManager>,
     auto_create_session: bool,
+    /// In-flight invocations, keyed by `invocation_id`. Entries are added
+    /// at the top of [`Self::start`] and removed when the corresponding
+    /// event stream completes. [`Self::cancel`] flips an entry's token
+    /// without touching the map so the stream observes cancellation and
+    /// drops the entry itself.
+    active: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl std::fmt::Debug for Runner {
@@ -77,7 +121,8 @@ impl Runner {
             .await
     }
 
-    /// Run with a typed [`Content`] and explicit [`RunConfig`].
+    /// Run with a typed [`Content`] and explicit [`RunConfig`]. Returns
+    /// just the event stream — convenience wrapper around [`Self::start`].
     pub async fn run_with(
         &self,
         user_id: &str,
@@ -85,13 +130,58 @@ impl Runner {
         user_content: Content,
         run_config: RunConfig,
     ) -> Result<EventStream<'static>> {
+        let handle = self
+            .start(user_id, session_id, user_content, run_config)
+            .await?;
+        Ok(handle.events)
+    }
+
+    /// Request cancellation of an in-flight invocation by id. Returns
+    /// `true` if a matching invocation was found and its token flipped, or
+    /// `false` if the id is unknown (already finished or never started).
+    /// Cancellation is cooperative — agents check the flag between LLM
+    /// calls and tool dispatches and exit cleanly. Tools currently in
+    /// flight will run to completion, but the agent stream won't issue
+    /// further turns.
+    pub fn cancel(&self, invocation_id: &str) -> bool {
+        let guard = self.active.lock();
+        if let Some(tok) = guard.get(invocation_id) {
+            tok.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True if an invocation with this id is currently registered as
+    /// in-flight.
+    #[must_use]
+    pub fn is_active(&self, invocation_id: &str) -> bool {
+        self.active.lock().contains_key(invocation_id)
+    }
+
+    /// Start an invocation and return a [`RunningInvocation`] handle.
+    /// Callers that need the `invocation_id` (e.g. to wire up
+    /// [`Self::cancel`]) should use this in preference to [`Self::run_with`].
+    pub async fn start(
+        &self,
+        user_id: &str,
+        session_id: Option<&str>,
+        user_content: Content,
+        run_config: RunConfig,
+    ) -> Result<RunningInvocation> {
         let session = self
             .load_or_create_session(user_id, session_id, None)
             .await?;
+        let invocation_id = InvocationContext::new_id();
+        let cancellation = CancellationToken::new();
+        self.active
+            .lock()
+            .insert(invocation_id.clone(), cancellation.clone());
         let invocation = Arc::new(InvocationContext {
             app_name: self.app_name.clone(),
             user_id: user_id.to_string(),
-            invocation_id: InvocationContext::new_id(),
+            invocation_id: invocation_id.clone(),
             session: Arc::new(Mutex::new(session.clone())),
             session_service: self.session_service.clone(),
             artifact_service: self.artifact_service.clone(),
@@ -101,6 +191,7 @@ impl Runner {
             origin: InvocationOrigin::Api,
             user_content: Some(user_content.clone()),
             llm_call_count: Arc::new(Mutex::new(0)),
+            cancellation: cancellation.clone(),
             attributes: Arc::new(Mutex::new(HashMap::new())),
         });
 
@@ -147,7 +238,17 @@ impl Runner {
         let inv = invocation.clone();
         let svc = self.session_service.clone();
         let plugins = self.plugins.clone();
+        let active = self.active.clone();
+        let invocation_id_for_dedup = invocation_id.clone();
         let stream = try_stream! {
+            // Deregister from `active` no matter how this stream ends —
+            // success, error, cancel, or caller-side drop. We can't use
+            // `Drop` on the stream itself (try_stream! captures by move),
+            // so use a guard wrapper.
+            let _guard = ActiveGuard {
+                active: active.clone(),
+                invocation_id: invocation_id_for_dedup.clone(),
+            };
             let agent_stream = agent.run(inv.clone()).await;
             match agent_stream {
                 Ok(mut s) => {
@@ -211,7 +312,11 @@ impl Runner {
             }
             plugins.after_run(&inv, None).await?;
         };
-        Ok(Box::pin(stream))
+        Ok(RunningInvocation {
+            invocation_id,
+            cancellation,
+            events: Box::pin(stream),
+        })
     }
 
     async fn load_or_create_session(
@@ -332,6 +437,7 @@ impl RunnerBuilder {
             credential_service: self.credential_service,
             plugins: Arc::new(self.plugins),
             auto_create_session: self.auto_create_session,
+            active: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
@@ -448,6 +554,128 @@ mod tests {
             .filter(|c| *c == &Content::user_text("hi"))
             .count();
         assert_eq!(user_count, 1);
+    }
+
+    #[tokio::test]
+    async fn start_returns_running_invocation_handle_with_stable_id() {
+        let m = Arc::new(MockModel::new("mock-1"));
+        m.push_text("hi");
+        let agent = Arc::new(
+            LlmAgent::builder("a")
+                .model(m.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let runner = Runner::builder()
+            .app_name("hello")
+            .agent(agent)
+            .session_service(Arc::new(InMemorySessionService::new()))
+            .build()
+            .unwrap();
+        let handle = runner
+            .start("u", None, Content::user_text("hi"), RunConfig::default())
+            .await
+            .unwrap();
+        let id = handle.invocation_id.clone();
+        assert!(runner.is_active(&id));
+        // Drain the stream so the ActiveGuard fires.
+        handle
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert!(!runner.is_active(&id));
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_id_returns_false() {
+        let m = Arc::new(MockModel::new("mock-1"));
+        m.push_text("ok");
+        let agent = Arc::new(
+            LlmAgent::builder("a")
+                .model(m as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let runner = Runner::builder()
+            .app_name("hello")
+            .agent(agent)
+            .session_service(Arc::new(InMemorySessionService::new()))
+            .build()
+            .unwrap();
+        assert!(!runner.cancel("nope"));
+    }
+
+    #[tokio::test]
+    async fn cancel_before_polling_stream_emits_cancelled_first() {
+        // Set up a model with several turns queued. If the agent ran to
+        // completion it would emit "first", "second", etc. We cancel
+        // before polling the stream — the agent's loop checks the
+        // cancellation flag at the top of its first iteration and exits
+        // with a CANCELLED event before issuing any LLM call.
+        let m = Arc::new(MockModel::new("mock-1"));
+        m.push_text("first");
+        m.push_text("second");
+        let agent = Arc::new(
+            LlmAgent::builder("a")
+                .model(m.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let runner = Arc::new(
+            Runner::builder()
+                .app_name("hello")
+                .agent(agent)
+                .session_service(Arc::new(InMemorySessionService::new()))
+                .build()
+                .unwrap(),
+        );
+
+        let handle = runner
+            .start("u", None, Content::user_text("go"), RunConfig::default())
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        // Cancel via the public Runner::cancel API — same path A2A uses.
+        assert!(runner.cancel(&inv_id));
+        let events = handle
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        // The stream must contain a CANCELLED event and *no* successful
+        // model text events.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.response.error_code.as_deref() == Some("CANCELLED")),
+            "expected a CANCELLED event; got {:?}",
+            events
+                .iter()
+                .map(|e| (
+                    e.author.clone(),
+                    e.response.error_code.clone(),
+                    e.response.content.as_ref().map(|c| c.text_concat())
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !events.iter().any(|e| {
+                e.response
+                    .content
+                    .as_ref()
+                    .map(|c| c.text_concat() == "first" || c.text_concat() == "second")
+                    .unwrap_or(false)
+            }),
+            "agent emitted model text after cancellation"
+        );
+        // Active map cleaned up by ActiveGuard.
+        assert!(!runner.is_active(&inv_id));
     }
 
     #[derive(Debug)]

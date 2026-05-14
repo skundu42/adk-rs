@@ -161,6 +161,18 @@ mod tests {
     }
 
     #[test]
+    fn to_wire_serializes_gemini_builtin_tools() {
+        let mut req = LlmRequest::default();
+        req.config.tools.push(Tool::GoogleSearch {});
+        req.config.tools.push(Tool::UrlContext {});
+        req.config.tools.push(Tool::CodeExecution {});
+        let body = serde_json::to_value(to_wire(&req)).unwrap();
+        assert_eq!(body["tools"][0], json!({"googleSearch": {}}));
+        assert_eq!(body["tools"][1], json!({"urlContext": {}}));
+        assert_eq!(body["tools"][2], json!({"codeExecution": {}}));
+    }
+
+    #[test]
     fn parse_response_unwraps_first_candidate() {
         let body = json!({
             "candidates": [{

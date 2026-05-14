@@ -7,6 +7,7 @@
 
 pub mod artifact;
 pub mod callback;
+pub mod cancel;
 pub mod context;
 pub mod event;
 pub mod llm_request;
@@ -33,6 +34,7 @@ pub use callback::{
     BeforeModelCallback, BeforeToolCallback, CallbackContext, OnModelErrorCallback,
     OnToolErrorCallback, ReadonlyContext,
 };
+pub use cancel::CancellationToken;
 pub use context::{InvocationContext, InvocationOrigin, ToolContext};
 pub use event::{Event, EventActions, EventCompaction};
 pub use llm_request::LlmRequest;

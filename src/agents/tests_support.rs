@@ -104,6 +104,7 @@ pub(crate) fn test_ctx() -> Arc<InvocationContext> {
         origin: InvocationOrigin::Api,
         user_content: Some(Content::user_text("hi")),
         llm_call_count: Arc::new(Mutex::new(0)),
+        cancellation: Default::default(),
         attributes: Arc::new(Mutex::new(HashMap::new())),
     })
 }

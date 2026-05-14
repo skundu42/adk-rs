@@ -19,6 +19,10 @@ pub mod providers;
 pub mod runner;
 pub mod services;
 pub mod tools;
+pub mod transport_security;
+
+#[cfg(feature = "a2a")]
+pub mod a2a;
 
 #[cfg(feature = "code-exec")]
 pub mod code_exec;

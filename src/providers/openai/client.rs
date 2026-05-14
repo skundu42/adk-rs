@@ -50,6 +50,7 @@ pub struct OpenAi {
 impl OpenAi {
     /// Construct.
     pub fn new(model_name: impl Into<String>, cfg: OpenAiConfig) -> Result<Self> {
+        crate::transport_security::require_secure_url(&cfg.base_url, "OpenAiConfig.base_url")?;
         let http = Client::builder()
             .timeout(cfg.timeout)
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
@@ -155,6 +156,24 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn rejects_plaintext_http_base_url() {
+        let err = OpenAi::new(
+            "gpt-4o-mini",
+            OpenAiConfig {
+                base_url: "http://api.example.com/v1".into(),
+                api_key: "k".into(),
+                ..OpenAiConfig::default()
+            },
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https") || msg.contains("loopback"),
+            "got: {msg}"
+        );
+    }
 
     #[tokio::test]
     async fn happy_path() {

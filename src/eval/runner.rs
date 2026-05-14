@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::BaseAgent;
-use crate::core::{InvocationContext, InvocationOrigin, RunConfig, SessionService, ToolContext};
+use crate::core::{InvocationContext, InvocationOrigin, RunConfig, SessionService};
 use crate::error::Result;
 use crate::genai_types::Part;
 use crate::services::mem::InMemorySessionService;
@@ -94,6 +94,7 @@ impl EvalRunner {
                 origin: InvocationOrigin::Api,
                 user_content: Some(inv.user_content.clone()),
                 llm_call_count: Arc::new(Mutex::new(0)),
+                cancellation: Default::default(),
                 attributes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             });
             // Append the user content event.
@@ -140,9 +141,6 @@ impl EvalRunner {
                 },
                 invocation_id: ctx.invocation_id.clone(),
             };
-
-            // Avoid unused-warning when no tools are configured.
-            let _ = ToolContext::new(ctx.clone());
 
             for evaluator in &self.evaluators {
                 let score = evaluator.evaluate(inv, &actual).await?;

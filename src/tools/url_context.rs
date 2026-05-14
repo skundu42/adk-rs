@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::core::{DynTool, LlmRequest, ToolContext};
 use crate::error::Result;
-use crate::genai_types::FunctionDeclaration;
+use crate::genai_types::{FunctionDeclaration, Tool};
 
 /// Enables Gemini's URL-context grounding for the next request.
 #[derive(Debug, Default)]
@@ -36,19 +36,68 @@ impl DynTool for UrlContext {
         req: &mut LlmRequest,
         _ctx: &mut ToolContext,
     ) -> Result<()> {
-        // Encode a hint in the request config that providers can pick up.
-        // For Gemini, the wire shape is `tools: [{url_context: {}}]`; other
-        // providers should ignore this attribute.
-        req.config.append_system_text(
-            "Use the urlContext capability to fetch and ground responses in \
-             URLs the user mentioned.",
-        );
+        if !req
+            .config
+            .tools
+            .iter()
+            .any(|t| matches!(t, Tool::UrlContext {}))
+        {
+            req.config.tools.push(Tool::UrlContext {});
+        }
         Ok(())
     }
 }
 
-/// Construct the `url_context` tool.
+/// Construct the `url_context` tool. Attach it via `LlmAgent::builder().tool(...)`
+/// to opt the Gemini request into URL-context grounding.
 #[must_use]
 pub fn url_context_tool() -> Arc<dyn DynTool> {
     Arc::new(UrlContext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{InvocationContext, InvocationOrigin, RunConfig, Session, SessionService};
+    use crate::services::mem::InMemorySessionService;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    fn ctx() -> ToolContext {
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let inv = Arc::new(InvocationContext {
+            app_name: "app".into(),
+            user_id: "u".into(),
+            invocation_id: "inv".into(),
+            session: Arc::new(Mutex::new(Session::new("app", "u", "s"))),
+            session_service: svc,
+            artifact_service: None,
+            memory_service: None,
+            credential_service: None,
+            run_config: RunConfig::default(),
+            origin: InvocationOrigin::Api,
+            user_content: None,
+            llm_call_count: Arc::new(Mutex::new(0)),
+            cancellation: Default::default(),
+            attributes: Arc::new(Mutex::new(HashMap::new())),
+        });
+        ToolContext::new(inv)
+    }
+
+    #[tokio::test]
+    async fn injects_url_context_tool_once() {
+        let tool = url_context_tool();
+        let mut req = LlmRequest::default();
+        let mut tctx = ctx();
+        tool.process_llm_request(&mut req, &mut tctx).await.unwrap();
+        tool.process_llm_request(&mut req, &mut tctx).await.unwrap();
+        assert_eq!(
+            req.config
+                .tools
+                .iter()
+                .filter(|t| matches!(t, Tool::UrlContext {}))
+                .count(),
+            1
+        );
+    }
 }

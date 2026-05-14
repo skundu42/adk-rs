@@ -92,6 +92,7 @@ impl DynTool for AgentTool {
             origin: InvocationOrigin::Api,
             user_content: Some(Content::user_text(request)),
             llm_call_count: ctx.invocation.llm_call_count.clone(),
+            cancellation: ctx.invocation.cancellation.clone(),
             attributes: ctx.invocation.attributes.clone(),
         });
         let mut stream = self.agent.clone().run(sub_ctx).await?;

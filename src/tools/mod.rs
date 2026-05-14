@@ -4,6 +4,7 @@
 mod agent_tool;
 mod builtin;
 mod function_tool;
+mod gemini_builtin;
 mod get_user_choice;
 mod load_artifacts;
 mod load_memory;
@@ -18,6 +19,7 @@ pub mod openapi;
 pub use agent_tool::AgentTool;
 pub use builtin::{exit_loop, transfer_to_agent_tool};
 pub use function_tool::FunctionTool;
+pub use gemini_builtin::{built_in_code_execution_tool, google_search_tool};
 pub use get_user_choice::get_user_choice_tool;
 pub use load_artifacts::load_artifacts_tool;
 pub use load_memory::load_memory_tool;

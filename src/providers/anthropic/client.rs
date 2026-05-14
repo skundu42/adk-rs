@@ -47,6 +47,7 @@ pub struct Anthropic {
 impl Anthropic {
     /// Construct.
     pub fn new(model_name: impl Into<String>, cfg: AnthropicConfig) -> Result<Self> {
+        crate::transport_security::require_secure_url(&cfg.base_url, "AnthropicConfig.base_url")?;
         let http = Client::builder()
             .timeout(cfg.timeout)
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
@@ -133,6 +134,20 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn rejects_plaintext_http_base_url() {
+        let err = Anthropic::new(
+            "claude-3-5-sonnet",
+            AnthropicConfig {
+                base_url: "http://api.example.com".into(),
+                api_key: "k".into(),
+                ..AnthropicConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("https"));
+    }
 
     #[tokio::test]
     async fn happy_path() {

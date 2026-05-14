@@ -86,6 +86,15 @@ pub enum Command {
         /// Listen address.
         #[arg(long, default_value = "127.0.0.1:8000")]
         bind: SocketAddr,
+        /// Bearer token required on `Authorization: Bearer <token>`. When
+        /// set, every request must present this token. Recommended whenever
+        /// `--bind` is anything other than localhost.
+        #[arg(long, env = "ADK_WEB_TOKEN")]
+        auth_token: Option<String>,
+        /// Bind a non-loopback address without an auth token. Refused by
+        /// default to prevent accidentally exposing the agent control plane.
+        #[arg(long)]
+        dangerously_allow_unauthenticated_remote: bool,
     },
     /// Run an eval set against a registered agent.
     Eval {
@@ -172,16 +181,29 @@ impl App {
                 }
                 Ok(())
             }
-            Command::Web { bind } => {
+            Command::Web {
+                bind,
+                auth_token,
+                dangerously_allow_unauthenticated_remote,
+            } => {
                 let mut runners = HashMap::new();
                 for (name, agent) in &self.agents {
                     runners.insert(name.clone(), Arc::new(self.runner_for(agent.clone())));
                 }
-                let state = crate::server::AppState {
-                    runners: Arc::new(runners),
+                let runners = Arc::new(runners);
+                let state = match auth_token {
+                    Some(t) => crate::server::AppState::with_bearer_token(runners, t),
+                    None => crate::server::AppState::unauthenticated(runners),
                 };
                 info!("starting dev server on http://{bind}");
-                crate::server::serve(bind, state).await
+                crate::server::serve_with(
+                    bind,
+                    state,
+                    crate::server::ServeOptions {
+                        dangerously_allow_unauthenticated_remote,
+                    },
+                )
+                .await
             }
             Command::Eval { set, agent } => {
                 let bytes = tokio::fs::read(set).await?;

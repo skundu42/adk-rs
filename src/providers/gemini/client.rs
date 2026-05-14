@@ -48,6 +48,9 @@ pub struct Gemini {
 impl Gemini {
     /// Construct from config and a model name.
     pub fn new(model_name: impl Into<String>, cfg: GeminiConfig) -> Result<Self> {
+        // Refuse to ship an API key over plaintext HTTP. Loopback is allowed
+        // for local mocks (the test suite below depends on this).
+        crate::transport_security::require_secure_url(&cfg.base_url, "GeminiConfig.base_url")?;
         let http = Client::builder()
             .timeout(cfg.timeout)
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
@@ -161,6 +164,20 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn rejects_plaintext_http_base_url() {
+        let err = Gemini::new(
+            "gemini-2.5-flash",
+            GeminiConfig {
+                base_url: "http://generativelanguage.googleapis.com".into(),
+                api_key: "k".into(),
+                ..GeminiConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("https"));
+    }
 
     #[tokio::test]
     async fn generate_content_happy_path() {

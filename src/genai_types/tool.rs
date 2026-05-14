@@ -40,23 +40,29 @@ impl FunctionDeclaration {
     }
 }
 
-/// A Gemini-style tool wrapper. Most of the variants are placeholders for v0.1;
-/// only `FunctionDeclarations` is used by the runner.
+/// A Gemini-style tool wrapper. Each variant maps to one entry in the wire
+/// `tools: [...]` array. The variants for the server-side built-ins
+/// (`GoogleSearch`, `UrlContext`, `CodeExecution`) carry an empty struct so
+/// they serialise as `{"googleSearch": {}}` / `{"urlContext": {}}` /
+/// `{"codeExecution": {}}` — Gemini's expected wire shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Tool {
     /// A list of function declarations.
     FunctionDeclarations(Vec<FunctionDeclaration>),
-    /// The built-in Google Search retrieval (only on Gemini).
-    GoogleSearch,
-    /// The built-in code-execution tool (only on Gemini).
-    CodeExecution,
+    /// The built-in Google Search grounding tool (Gemini-only).
+    GoogleSearch {},
+    /// The built-in URL-context grounding tool (Gemini 2+).
+    UrlContext {},
+    /// The built-in server-side code-execution tool (Gemini-only).
+    CodeExecution {},
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::genai_types::schema::Schema;
+    use serde_json::json;
 
     #[test]
     fn declaration_round_trips() {
@@ -66,5 +72,34 @@ mod tests {
         assert_eq!(j["parameters"]["type"], "OBJECT");
         let back: FunctionDeclaration = serde_json::from_value(j).unwrap();
         assert_eq!(d, back);
+    }
+
+    #[test]
+    fn builtin_tools_serialize_as_empty_objects() {
+        assert_eq!(
+            serde_json::to_value(Tool::GoogleSearch {}).unwrap(),
+            json!({"googleSearch": {}})
+        );
+        assert_eq!(
+            serde_json::to_value(Tool::UrlContext {}).unwrap(),
+            json!({"urlContext": {}})
+        );
+        assert_eq!(
+            serde_json::to_value(Tool::CodeExecution {}).unwrap(),
+            json!({"codeExecution": {}})
+        );
+    }
+
+    #[test]
+    fn builtin_tools_round_trip() {
+        for t in [
+            Tool::GoogleSearch {},
+            Tool::UrlContext {},
+            Tool::CodeExecution {},
+        ] {
+            let j = serde_json::to_value(&t).unwrap();
+            let back: Tool = serde_json::from_value(j).unwrap();
+            assert_eq!(t, back);
+        }
     }
 }

@@ -5,4 +5,4 @@
 mod app;
 mod routes;
 
-pub use app::{AppState, build_router, serve};
+pub use app::{AppState, ServeOptions, build_router, serve, serve_with};

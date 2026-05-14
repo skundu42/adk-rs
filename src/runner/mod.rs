@@ -4,4 +4,4 @@ mod plugin;
 mod runner;
 
 pub use plugin::{BasePlugin, LoggingPlugin, PluginManager};
-pub use runner::{Runner, RunnerBuilder};
+pub use runner::{Runner, RunnerBuilder, RunningInvocation};

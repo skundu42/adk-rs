@@ -511,12 +511,12 @@ mod tests {
             .create_session("app", "alice", None, Some("s1"))
             .await
             .unwrap();
+        assert_eq!(s1.id, "s1");
         let mut s1m = svc
             .get_session("app", "alice", "s1", GetSessionConfig::default())
             .await
             .unwrap()
             .unwrap();
-        let _ = s1; // silence unused
 
         let mut ev = Event::user_text("hi");
         ev.actions

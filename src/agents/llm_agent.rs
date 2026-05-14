@@ -140,6 +140,16 @@ impl BaseAgent for LlmAgent {
             }
 
             for _iter in 0..me.max_iterations {
+                if ctx2.is_cancelled() {
+                    let mut e = cancellation_event(&me.name, &ctx2.invocation_id);
+                    {
+                        let mut sess = ctx2.session.lock();
+                        sess.events.push(e.clone());
+                    }
+                    e.invocation_id = ctx2.invocation_id.clone();
+                    yield e;
+                    return;
+                }
                 ctx2.check_and_inc_llm_call()?;
                 debug!("LLM call iteration {}", _iter);
                 let resp = me.model.generate_content(req.clone()).await?;
@@ -431,6 +441,24 @@ fn ensure_function_call_ids(event: &mut Event) {
     }
 }
 
+/// Build a terminal event signalling that the agent observed a
+/// cancellation and stopped before the next LLM call. The event carries a
+/// `CANCELLED` error code (mirroring Python ADK's
+/// `Event.error_code = "CANCELLED"`) so downstream consumers can
+/// distinguish a cancel from an organic stop or a budget exhaustion.
+fn cancellation_event(author: &str, invocation_id: &str) -> Event {
+    let mut e = Event::new(
+        author,
+        LlmResponse {
+            error_code: Some("CANCELLED".into()),
+            error_message: Some("invocation was cancelled".into()),
+            ..LlmResponse::default()
+        },
+    );
+    e.invocation_id = invocation_id.to_string();
+    e
+}
+
 fn response_to_event(author: &str, invocation_id: &str, resp: LlmResponse) -> Event {
     Event {
         id: Event::new_id(),
@@ -588,8 +616,6 @@ async fn resolve_auth_and_run(
             }
         }
     }
-    #[cfg(not(feature = "auth"))]
-    let _ = tool.auth_config(); // suppress unused-trait-method warning
 
     let value = match tool.run(args, tctx).await {
         Ok(v) => v,
@@ -755,6 +781,7 @@ mod tests {
             origin: InvocationOrigin::Api,
             user_content: Some(Content::user_text(user_text)),
             llm_call_count: Arc::new(Mutex::new(0)),
+            cancellation: Default::default(),
             attributes: Arc::new(Mutex::new(HashMap::new())),
         })
     }

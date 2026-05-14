@@ -6,14 +6,19 @@ Agent Development Kit (ADK) is a flexible, modular framework that applies softwa
 
 ## ✨ Key Features
 
-- **First-class providers** — Gemini (REST + SSE), Anthropic Claude (Messages API + SSE), and an OpenAI-compatible client that also serves Azure OpenAI, Ollama, and Groq via base-URL override.
-- **Composable agent primitives** — `LlmAgent`, `SequentialAgent`, `ParallelAgent`, and `LoopAgent`, all driven by a unified event stream over `tokio`.
+- **First-class providers** — Gemini (REST + SSE) with server-side built-ins (`google_search`, `url_context`, `built_in_code_execution`), Anthropic Claude (Messages API + SSE), and an OpenAI-compatible client that also serves Azure OpenAI, Ollama, and Groq via base-URL override.
+- **Composable agent primitives** — `LlmAgent`, `SequentialAgent`, `ParallelAgent`, and `LoopAgent`, all driven by a unified event stream over `tokio` and a cooperative `CancellationToken`.
 - **Ergonomic tools** — annotate any async function with `#[adk_rs::tool]`; the macro derives the JSON schema, the `FunctionDeclaration`, and a `Tool` impl. Manual implementations remain available as an escape hatch.
 - **Pluggable services** — session, memory, artifact, and credential traits with in-memory, filesystem, SQLite, and PostgreSQL backends out of the box.
-- **MCP toolset** — connect to any Model Context Protocol server over stdio.
+- **MCP toolset** — connect to any Model Context Protocol server over stdio *or* streamable HTTP (with `Mcp-Session-Id` echo and SSE-response support).
+- **A2A protocol** — wire-compatible Google Agent-to-Agent JSON-RPC client + server bridge: `message/send`, `message/stream`, `tasks/get` / `cancel` / `resubscribe`, `tasks/pushNotificationConfig/*` webhook delivery, and `/.well-known/agent.json` discovery. Talk to Python `google-adk` agents and vice versa.
+- **Authenticated tools** — full OAuth 2.0 (auth-code + PKCE, client-credentials, refresh), Service Account JWTs, API keys, and HTTP basic/bearer with interactive-consent suspend/resume.
+- **OpenAPI generator** — point at a 3.x spec; get one tool per operation with security schemes mapped to `AuthConfig`.
+- **Sandboxed code execution** — local subprocess or locked-down Docker container (cap-drop, no-new-privileges, memory / CPU / pids caps, non-root user, no network, read-only rootfs).
 - **Production telemetry** — `tracing` integration with optional OpenTelemetry OTLP export.
-- **Evaluation framework** — replay JSON eval sets (compatible with the Python ADK format) and score with trajectory and LLM-judge metrics.
-- **Dev server + CLI scaffolding** — an `axum`-based HTTP/SSE server and a library-style CLI that you embed in your own binary.
+- **Evaluation framework** — replay JSON eval sets (compatible with the Python ADK format) and score with trajectory and response-match metrics.
+- **Dev server + CLI scaffolding** — an `axum`-based HTTP/SSE server (with bearer-token auth + loopback-default) and a library-style CLI that you embed in your own binary.
+- **Secure by default** — refuses to send API keys / OAuth tokens over plaintext HTTP, refuses non-loopback binds without auth, and sanitises filesystem artifact paths against `..` traversal.
 
 ## 🚀 Installation
 
@@ -33,16 +38,17 @@ futures = "0.3"
 | `gemini` / `anthropic` / `openai` | the matching LLM provider |
 | `fs` | filesystem artifact service |
 | `sqlite` / `postgres` | SQL session backend |
-| `mcp` | Model Context Protocol stdio client |
+| `mcp` | Model Context Protocol — stdio + streamable HTTP transports |
 | `telemetry` | `tracing-subscriber` setup (add `otel` for OpenTelemetry OTLP export) |
 | `eval` | evaluation framework |
-| `server` | axum dev server with SSE |
+| `server` | axum dev server with SSE + bearer auth + loopback guard |
 | `cli` | embeddable `clap`-based CLI scaffolding |
 | `macros` | the `#[tool]` proc-macro |
 | `auth` | OAuth2 / ServiceAccount / API-key / HTTP credential flow |
 | `openapi` | generate tools from an OpenAPI 3.x spec |
 | `code-exec` | local-subprocess code executor |
 | `code-exec-docker` | extra: ephemeral Docker container per call (`docker` on `$PATH`) |
+| `a2a` | Agent-to-Agent JSON-RPC client + server bridge (spec-compliant) |
 | `full` | enables all of the above |
 
 Requires Rust **1.85+** (edition 2024).
@@ -176,7 +182,120 @@ let agent = LlmAgent::builder("coder")
 Two executors ship in the box:
 
 - **`LocalCodeExecutor`** — spawns a child interpreter via `tokio::process` with a configurable timeout. Subprocess isolation only; **not a security boundary**.
-- **`ContainerCodeExecutor`** (`feature = "code-exec-docker"`) — shells out to `docker run --rm --network=none --read-only ...` for a fresh ephemeral container per call. Requires the `docker` CLI.
+- **`ContainerCodeExecutor`** (`feature = "code-exec-docker"`) — fresh ephemeral container per call, locked down by default: `--network=none`, `--read-only` rootfs, `--memory=256m`, `--cpus=1.0`, `--pids-limit=128`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and `--user=65534:65534` (non-root). Every cap is exposed as a typed `with_*` builder method; relaxing the defaults is a deliberate act. Requires the `docker` CLI.
+
+## 🔗 MCP — stdio and streamable HTTP (`feature = "mcp"`)
+
+Connect to a local MCP server over stdio:
+
+```rust
+use adk_rs::mcp::{McpStdioParams, McpToolset};
+
+let tools = McpToolset::stdio(McpStdioParams {
+    command: "mcp-fs-server".into(),
+    args: vec!["--root".into(), "/tmp/scratch".into()],
+    ..Default::default()
+})
+.await?;
+```
+
+Or to a remote MCP server over the streamable-HTTP transport (single POST endpoint, response is `application/json` or SSE; `Mcp-Session-Id` is echoed automatically):
+
+```rust
+use adk_rs::mcp::{McpHttpParams, McpToolset};
+use std::collections::HashMap;
+
+let mut headers = HashMap::new();
+headers.insert("Authorization".into(), format!("Bearer {}", std::env::var("MCP_TOKEN")?));
+let tools = McpToolset::http(McpHttpParams {
+    url: "https://mcp.example.com/v1".into(),
+    headers,
+    ..Default::default()
+})
+.await?;
+```
+
+If you pass a credential-bearing header against a non-loopback `http://` URL, construction refuses — see [Secure by default](#-secure-by-default) below.
+
+## 🤖 A2A — Agent-to-Agent JSON-RPC (`feature = "a2a"`)
+
+`adk-rs` ships a spec-compliant A2A surface so Rust agents can talk to other ADK agents (Python or Rust) over JSON-RPC. Both halves work:
+
+**Expose a local `Runner` as an A2A endpoint:**
+
+```rust
+use adk_rs::a2a::{
+    A2aServerConfig, A2aState, AgentCapabilities, AgentCard, serve,
+};
+use std::sync::Arc;
+
+let card = AgentCard {
+    name: "greeter".into(),
+    description: "A friendly greeter".into(),
+    url: "https://my-host/a2a/".into(),
+    version: "0.1.0".into(),
+    capabilities: AgentCapabilities { streaming: true, ..Default::default() },
+    default_input_modes: vec!["text/plain".into()],
+    default_output_modes: vec!["text/plain".into()],
+    ..Default::default()
+};
+let state = A2aState::new(runner, A2aServerConfig::new(card).with_bearer_token("hunter2"));
+serve("127.0.0.1:8080".parse()?, state).await?;
+```
+
+The router mounts:
+
+- `GET /.well-known/agent.json` — discovery (the `AgentCard`).
+- `POST /` — JSON-RPC: `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel`, `tasks/resubscribe`, `tasks/pushNotificationConfig/{set,get,list,delete}`.
+
+Push-notification webhooks fan out via [`PushNotifier`](src/a2a/push_notifier.rs) — bodies match the `message/stream` envelope so the same receiver can consume both. Webhook URLs must be HTTPS or loopback.
+
+**Call a remote A2A agent as a local `BaseAgent`:**
+
+```rust
+use adk_rs::a2a::{RemoteA2aAgent, RemoteA2aConfig};
+use std::time::Duration;
+
+let remote = RemoteA2aAgent::connect(RemoteA2aConfig {
+    name: "fallback".into(), // overridden by the fetched agent card
+    url: "https://peer.example.com/a2a/".into(),
+    agent_card_url: Some("https://peer.example.com/.well-known/agent.json".into()),
+    stream: true, // use message/stream over SSE
+    timeout: Duration::from_secs(60),
+    ..Default::default()
+})
+.await?;
+```
+
+Plug `remote` into any agent tree exactly like a local `LlmAgent` — `sub_agent(remote)`, `AgentTool::new(remote)`, etc.
+
+## ⏹ Cancel and resume
+
+Every invocation carries a cooperative [`CancellationToken`](src/core/cancel.rs). Agents check it between LLM calls and between sub-agents; when set, the stream ends with a `CANCELLED` event.
+
+```rust
+let handle = runner
+    .start("user", None, content, RunConfig::default())
+    .await?;
+let inv_id = handle.invocation_id.clone();
+
+// From anywhere:
+runner.cancel(&inv_id);
+
+// Or via A2A: `tasks/cancel` on the corresponding task id routes the
+// cancel back through to the underlying runner invocation.
+```
+
+Resuming an interrupted conversation needs no special API — sessions are append-only event logs, so calling `runner.run(..., session_id, ...)` against an existing session replays the conversation. Auth-pending tool calls are resumed via the `adk_request_credential` synthetic flow.
+
+## 🔒 Secure by default
+
+A handful of guards trip when behaviour would be unsafe:
+
+- **HTTPS-only credentials.** Provider clients (`Gemini`, `Anthropic`, `OpenAi`), `RestApiTool`, MCP HTTP, and the A2A client all refuse to send API keys / bearer tokens / cookies over plaintext HTTP. Loopback hosts are allowed for local mocks.
+- **Loopback-only dev servers.** Both the `server` and A2A `serve` refuse non-loopback binds unless an auth token is configured (`AppState::with_bearer_token(...)`) or `ServeOptions::dangerously_allow_unauthenticated_remote` is opted in. CLI: `--auth-token` / `--dangerously-allow-unauthenticated-remote`.
+- **Filesystem artifact paths.** `FileArtifactService::sanitize` collapses dot-only components so an attacker-controlled `app_name` / `user_id` / `session_id` / `filename` can't escape the artifact root via `..` segments.
+- **Container code execution.** See the `ContainerCodeExecutor` defaults above — locked-down memory / CPU / pids caps, capability drops, non-root user.
 
 ## 🛠 Defining a tool
 
@@ -234,14 +353,18 @@ This gives you four subcommands out of the box:
 
 ```sh
 my-app run --agent greeter "Hello!"     # single-turn invocation
-my-app web --bind 127.0.0.1:8000        # axum dev server with SSE
+my-app web --bind 127.0.0.1:8000        # axum dev server with SSE (loopback default)
+my-app web --bind 0.0.0.0:8000 --auth-token "$ADK_WEB_TOKEN"   # non-loopback bind requires auth
 my-app eval --agent greeter --set hello.evalset.json
 my-app version
 ```
 
 ## 🌐 Dev web server
 
-`adk-rs-server` exposes the runner over HTTP and Server-Sent Events for local testing and integration with web frontends. The `web` subcommand above starts it; for embedding directly, see [`adk-rs-server`](adk-rs-server/).
+`adk-rs::server` exposes the runner over HTTP and Server-Sent Events for local testing and integration with web frontends. The `web` subcommand above starts it.
+
+- Binds to `127.0.0.1` by default. Non-loopback addresses are refused unless you set a bearer token (`--auth-token` / `AppState::with_bearer_token`) or opt in via `--dangerously-allow-unauthenticated-remote`.
+- When a token is set, every request must carry `Authorization: Bearer <token>`; comparisons are constant-time.
 
 ## 📊 Evaluating agents
 
@@ -275,24 +398,26 @@ let report = runner.run_set(&set).await?;
 | Module | Feature gate | Responsibility |
 |---|---|---|
 | [`error`](src/error.rs) | always on | `Error` / `Result` and error codes. |
-| [`genai_types`](src/genai_types/) | always on | Wire-neutral data: `Content`, `Part`, `Schema`, `FunctionCall`, `GenerateContentConfig`. |
-| [`core`](src/core/) | always on | Domain primitives: `Event`, `Session`, `State`, `LlmRequest/Response`, `InvocationContext`, service traits. |
+| [`transport_security`](src/transport_security.rs) | always on | `require_secure_url` — HTTPS-or-loopback guard shared by every credential-bearing client. |
+| [`genai_types`](src/genai_types/) | always on | Wire-neutral data: `Content`, `Part`, `Schema`, `FunctionCall`, `GenerateContentConfig`, `Tool` (including Gemini server-side `googleSearch` / `urlContext` / `codeExecution`). |
+| [`core`](src/core/) | always on | Domain primitives: `Event`, `Session`, `State`, `LlmRequest/Response`, `InvocationContext`, `CancellationToken`, service traits. |
 | [`services::mem`](src/services/mem/) | always on | In-memory session, memory, artifact, and credential services. |
-| [`services::fs`](src/services/fs.rs) | `fs` | Filesystem artifact service. |
+| [`services::fs`](src/services/fs.rs) | `fs` | Filesystem artifact service (path-traversal hardened). |
 | [`services::sql`](src/services/sql/) | `sqlite` / `postgres` | SQL `SessionService` over `sqlx`. |
-| [`providers::gemini`](src/providers/gemini/) | `gemini` | Gemini REST + SSE provider. |
-| [`providers::anthropic`](src/providers/anthropic/) | `anthropic` | Anthropic Messages API + SSE provider. |
-| [`providers::openai`](src/providers/openai/) | `openai` | OpenAI-compatible provider (Azure / Ollama / Groq via base-URL). |
-| [`tools`](src/tools/) | always on | `Tool` trait, `FunctionTool`, built-ins, `load_artifacts`, `load_memory`, `get_user_choice`, `agent_tool`, `LongRunningFunctionTool`. |
+| [`providers::gemini`](src/providers/gemini/) | `gemini` | Gemini REST + SSE provider; HTTPS-only base URL. |
+| [`providers::anthropic`](src/providers/anthropic/) | `anthropic` | Anthropic Messages API + SSE provider; HTTPS-only base URL. |
+| [`providers::openai`](src/providers/openai/) | `openai` | OpenAI-compatible provider (Azure / Ollama / Groq via base-URL); HTTPS-only base URL. |
+| [`tools`](src/tools/) | always on | `Tool` trait, `FunctionTool`, built-ins (`transfer_to_agent`, `exit_loop`, `google_search`, `url_context`, `built_in_code_execution`, `load_artifacts`, `load_memory`, `get_user_choice`, `agent_tool`, `LongRunningFunctionTool`). |
 | [`tools::openapi`](src/tools/openapi/) | `openapi` | `OpenAPIToolset` — generate `RestApiTool`s from an OpenAPI 3.x spec. |
-| [`agents`](src/agents/) | always on | `BaseAgent`, `LlmAgent`, `SequentialAgent`, `ParallelAgent`, `LoopAgent`. |
+| [`agents`](src/agents/) | always on | `BaseAgent`, `LlmAgent`, `SequentialAgent`, `ParallelAgent`, `LoopAgent`. All observe `InvocationContext::cancellation`. |
 | [`auth`](src/auth/) | types always on, flow gated on `auth` | `AuthCredential`, `AuthScheme`, `AuthConfig`, `CredentialService`, `CredentialManager`, OAuth2 `AuthHandler`, `AuthPreprocessor`. |
-| [`code_exec`](src/code_exec/) | `code-exec` | `CodeExecutor` trait; `LocalCodeExecutor`, `ContainerCodeExecutor`. |
-| [`runner`](src/runner/) | always on | Orchestration: LLM flow, tool dispatch, agent transfer, plugins. |
-| [`mcp`](src/mcp/) | `mcp` | MCP stdio client and `McpToolset`. |
+| [`code_exec`](src/code_exec/) | `code-exec` (+ `code-exec-docker`) | `CodeExecutor` trait; `LocalCodeExecutor`, locked-down `ContainerCodeExecutor`. |
+| [`runner`](src/runner/) | always on | Orchestration: `Runner::start` returns a `RunningInvocation` handle; `Runner::cancel(invocation_id)` halts in-flight agents. |
+| [`mcp`](src/mcp/) | `mcp` | MCP stdio + streamable HTTP transports, `McpClient`, `McpToolset`. |
+| [`a2a`](src/a2a/) | `a2a` | Spec-compliant A2A JSON-RPC: types, `TaskService` + `InMemoryTaskService`, `PushNotifier`, `RemoteA2aAgent` client, axum server bridge, agent-card discovery. |
 | [`telemetry`](src/telemetry.rs) | `telemetry` (+ `otel`) | `tracing-subscriber` setup with optional OTLP export. |
 | [`eval`](src/eval/) | `eval` | Eval-set IO and metrics. |
-| [`server`](src/server/) | `server` | `axum` dev server with SSE. |
+| [`server`](src/server/) | `server` | `axum` dev server with SSE, bearer-token auth, and loopback-default bind guard. |
 | [`cli`](src/cli.rs) | `cli` | Embeddable CLI scaffolding. |
 
 The `#[tool]` proc-macro lives in a sibling crate, [`adk-rs-macros`](adk-rs-macros/), which is required by the Rust compiler to be its own crate. Enable it via the `macros` feature.

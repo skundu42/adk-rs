@@ -223,7 +223,7 @@ impl SessionService for InMemorySessionService {
         // Critical section: apply delta + push event + snapshot for mirroring.
         // `apply_event_to_session` handles temp + non-temp into the in-memory
         // view so the invocation sees the fully-merged state.
-        let (event, key, mut session_only_snap) = {
+        let (event, key, session_only_snap) = {
             let mut sess = session_lock.lock();
             let event = crate::core::services::apply_event_to_session(&mut sess, event);
             let key = Self::key(&sess.app_name, &sess.user_id, &sess.id);
@@ -262,7 +262,6 @@ impl SessionService for InMemorySessionService {
             self.sessions
                 .insert(mirror_key, Arc::new(Mutex::new(session_only_snap.clone())));
         }
-        let _ = &mut session_only_snap; // suppress unused-mut
         Ok(event)
     }
 }

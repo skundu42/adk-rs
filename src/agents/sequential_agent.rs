@@ -55,6 +55,9 @@ impl BaseAgent for SequentialAgent {
         let me = self.clone();
         let stream = try_stream! {
             for sub in &me.sub_agents {
+                if ctx.is_cancelled() {
+                    return;
+                }
                 let mut s = Box::pin(sub.clone().run(ctx.clone()).await?);
                 while let Some(ev) = s.next().await {
                     let ev = ev?;

@@ -39,9 +39,7 @@ fn make_state() -> AppState {
         .unwrap();
     let mut runners: HashMap<String, Arc<Runner>> = HashMap::new();
     runners.insert("greet".into(), Arc::new(runner));
-    AppState {
-        runners: Arc::new(runners),
-    }
+    AppState::unauthenticated(Arc::new(runners))
 }
 
 async fn json_body(resp: axum::response::Response) -> Value {

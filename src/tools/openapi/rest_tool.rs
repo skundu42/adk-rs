@@ -156,8 +156,13 @@ impl DynTool for RestApiTool {
             .flatten()
             .cloned();
 
-        // Auth injection from ctx.auth_credential.
+        // Auth injection from ctx.auth_credential. Before we attach any
+        // credential to the outgoing request, refuse if the target URL is
+        // plaintext HTTP (loopback hosts are allowed for local mocks). This
+        // catches a misconfigured `base_url` *and* an attacker-controlled
+        // server URL inserted via `OpenAPI servers[]` substitution.
         if let (Some(cred), Some(cfg)) = (ctx.auth_credential.clone(), &self.auth_config) {
+            crate::transport_security::require_secure_url(&url, "RestApiTool.url")?;
             inject_credential(&cred, &cfg.auth_scheme, &mut headers, &mut query)?;
         }
 

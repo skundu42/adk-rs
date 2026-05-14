@@ -85,9 +85,15 @@ impl BaseAgent for ParallelAgent {
             });
         }
         drop(tx); // close after all spawns hold their own clones
+        let ctx_for_outer = ctx.clone();
         let stream = try_stream! {
             let mut rx = ReceiverStream::new(rx);
             while let Some(ev) = rx.next().await {
+                if ctx_for_outer.is_cancelled() {
+                    // Drop the receiver: in-flight sub-agent tasks observe
+                    // the same cancellation flag and exit themselves.
+                    return;
+                }
                 yield ev?;
             }
         };

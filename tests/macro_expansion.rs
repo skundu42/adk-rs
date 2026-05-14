@@ -79,6 +79,7 @@ fn ctx() -> ToolContext {
         origin: InvocationOrigin::Api,
         user_content: None,
         llm_call_count: Arc::new(Mutex::new(0)),
+        cancellation: Default::default(),
         attributes: Arc::new(Mutex::new(std::collections::HashMap::new())),
     });
     ToolContext::new(inv)

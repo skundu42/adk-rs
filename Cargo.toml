@@ -142,7 +142,7 @@ fs = []
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 postgres = ["dep:sqlx", "sqlx/postgres"]
 # Subsystems
-mcp = []
+mcp = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
 telemetry = ["dep:tracing-subscriber"]
 otel = ["telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 eval = []
@@ -154,6 +154,8 @@ auth = ["dep:reqwest", "dep:url", "dep:oauth2", "dep:jsonwebtoken", "dep:rand"]
 openapi = ["dep:reqwest", "dep:url", "dep:openapiv3", "dep:serde_yaml"]
 code-exec = []
 code-exec-docker = ["code-exec"]
+# Agent-to-Agent JSON-RPC client + server bridge.
+a2a = ["dep:reqwest", "dep:url", "dep:eventsource-stream", "dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
 # Test-only helpers
 testing = []
 # Convenience: everything on
@@ -162,7 +164,7 @@ full = [
     "fs", "sqlite",
     "mcp", "telemetry", "eval", "server", "cli", "macros",
     "auth", "openapi", "code-exec", "code-exec-docker",
-    "testing",
+    "a2a", "testing",
 ]
 
 [dependencies]
@@ -269,6 +271,10 @@ required-features = ["auth"]
 [[test]]
 name = "openapi_petstore"
 required-features = ["openapi", "auth", "testing"]
+
+[[test]]
+name = "a2a_roundtrip"
+required-features = ["a2a", "testing"]
 
 [profile.release]
 opt-level = 3
