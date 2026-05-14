@@ -90,10 +90,26 @@ impl CredentialExchanger for OAuth2Exchanger {
         let Some(oauth2) = raw.oauth2.as_ref() else {
             return Ok(None);
         };
+        let now = Utc::now().timestamp();
 
-        // (1) Already-baked token.
+        // (1) Already-baked token. If still fresh, hand it through; if expired
+        // and we have a refresh token, run the refresh; otherwise refuse so the
+        // caller (CredentialManager) falls through to the consent path rather
+        // than serving an expired token forever (v0.2 #5).
         if oauth2.access_token.is_some() {
-            return Ok(Some(raw.clone()));
+            if !raw.is_expired(now) {
+                return Ok(Some(raw.clone()));
+            }
+            if oauth2.refresh_token.is_some() {
+                let refresher = crate::auth::refresher::OAuth2Refresher;
+                if let Some(refreshed) =
+                    crate::auth::refresher::CredentialRefresher::refresh(&refresher, config, raw)
+                        .await?
+                {
+                    return Ok(Some(refreshed));
+                }
+            }
+            return Ok(None);
         }
 
         // (2) Authorization-code flow.
@@ -213,11 +229,13 @@ impl CredentialExchanger for ServiceAccountExchanger {
         let Some(sa) = raw.service_account.as_ref() else {
             return Ok(None);
         };
-        // Already exchanged?
-        if sa.access_token.is_some() {
+        let now = Utc::now().timestamp();
+        // Already-baked access token that's still fresh? Hand through.
+        if sa.access_token.is_some() && !raw.is_expired(now) {
             return Ok(Some(raw.clone()));
         }
-
+        // Otherwise re-sign and re-exchange. SA tokens have no refresh-token —
+        // a fresh assertion is the refresh mechanism.
         let token = sign_and_post_jwt(sa).await?;
         let mut new = sa.clone();
         new.access_token = Some(token.access_token);
@@ -368,6 +386,30 @@ mod tests {
         assert_eq!(
             out.service_account.unwrap().access_token.as_deref(),
             Some("baked")
+        );
+    }
+
+    /// Verifies bug-fix v0.2.1 #5: an `access_token` that's already expired
+    /// MUST NOT be passed through as ready. Without a refresh_token there's
+    /// no way to revive it, so the exchanger returns `Ok(None)` and lets
+    /// `CredentialManager` fall through to the consent path.
+    #[tokio::test]
+    async fn oauth2_does_not_serve_expired_token_without_refresh_token() {
+        let raw = AuthCredential::oauth2(OAuth2Auth {
+            client_id: "id".into(),
+            access_token: Some("stale".into()),
+            expires_at: Some(0), // expired long ago
+            // no refresh_token
+            ..OAuth2Auth::default()
+        });
+        let cfg = AuthConfig::new(AuthScheme::OAuth2 {
+            flows: Default::default(),
+            description: None,
+        });
+        let out = OAuth2Exchanger.exchange(&cfg, &raw).await.unwrap();
+        assert!(
+            out.is_none(),
+            "expired access_token without refresh_token should not pass through; got {out:?}"
         );
     }
 }

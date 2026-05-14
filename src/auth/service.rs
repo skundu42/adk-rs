@@ -7,7 +7,6 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use crate::auth::credential::AuthCredential;
-use crate::core::state::State;
 use crate::error::Result;
 
 /// Persists resolved credentials keyed by `(app, user, key)`.
@@ -164,11 +163,6 @@ pub fn session_state_key(key: &str) -> String {
 pub fn render_to_state(cred: &AuthCredential) -> serde_json::Value {
     serde_json::to_value(cred).unwrap_or(serde_json::Value::Null)
 }
-
-/// Mark this helper used so the unused-warning lint stays quiet when the
-/// runner integration lands.
-#[doc(hidden)]
-pub fn _touch_state(_s: &State) {}
 
 #[cfg(test)]
 mod tests {

@@ -113,14 +113,45 @@ impl BaseAgent for LlmAgent {
                 .collect();
             req.contents = history;
             if let Some(user) = &ctx2.user_content {
-                req.contents.push(user.clone());
+                if req.contents.last() != Some(user) {
+                    req.contents.push(user.clone());
+                }
+            }
+
+            let replayed_responses = replay_resumed_tool_calls(&ctx2, &req).await?;
+            if !replayed_responses.is_empty() {
+                let replay_event = function_response_event(
+                    &me.name,
+                    &ctx2.invocation_id,
+                    replayed_responses.clone(),
+                );
+                {
+                    let mut sess = ctx2.session.lock();
+                    sess.events.push(replay_event.clone());
+                }
+                yield replay_event;
+                req.contents.push(Content {
+                    role: Role::Tool,
+                    parts: replayed_responses
+                        .into_iter()
+                        .map(Part::FunctionResponse)
+                        .collect(),
+                });
             }
 
             for _iter in 0..me.max_iterations {
                 ctx2.check_and_inc_llm_call()?;
                 debug!("LLM call iteration {}", _iter);
                 let resp = me.model.generate_content(req.clone()).await?;
-                let event = response_to_event(&me.name, &ctx2.invocation_id, resp.clone());
+                let mut event = response_to_event(&me.name, &ctx2.invocation_id, resp.clone());
+
+                // Gemini may omit `FunctionCall.id`. Synthesize a stable id
+                // for any id-less call BEFORE pushing the event into the
+                // session so every downstream consumer (session.events,
+                // ToolContext, FunctionResponse, replay matcher, auth
+                // preprocessor) sees the same value. Without this, auth-pending
+                // tool calls cannot be resumed after consent.
+                ensure_function_call_ids(&mut event);
 
                 // Persist on session.
                 {
@@ -139,28 +170,63 @@ impl BaseAgent for LlmAgent {
                         if !code_parts.is_empty() {
                             yield event.clone();
                             let mut result_parts: Vec<Part> = Vec::new();
+                            let max_attempts = executor.error_retry_attempts().max(1);
                             for (lang, code) in &code_parts {
-                                let result = executor
-                                    .execute_code(
-                                        &ctx2,
-                                        crate::code_exec::CodeExecutionInput {
-                                            code: code.clone(),
-                                            language: lang.clone(),
-                                            ..Default::default()
+                                let mut last_err: Option<crate::error::Error> = None;
+                                let mut delivered = false;
+                                for _attempt in 0..max_attempts {
+                                    match executor
+                                        .execute_code(
+                                            &ctx2,
+                                            crate::code_exec::CodeExecutionInput {
+                                                code: code.clone(),
+                                                language: lang.clone(),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        Ok(result) => {
+                                            // Outcome is driven by the child's
+                                            // exit code, not by stderr presence
+                                            // (stderr is routine for warnings).
+                                            let outcome = if result.is_success() {
+                                                crate::genai_types::part::Outcome::OutcomeOk
+                                            } else {
+                                                crate::genai_types::part::Outcome::OutcomeFailed
+                                            };
+                                            result_parts.push(Part::CodeExecutionResult(
+                                                crate::genai_types::part::CodeExecutionResult {
+                                                    outcome,
+                                                    output: Some(result.combined_output()),
+                                                },
+                                            ));
+                                            delivered = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "code executor error (will retry): {e}"
+                                            );
+                                            last_err = Some(e);
+                                        }
+                                    }
+                                }
+                                if !delivered {
+                                    // Out of retries — surface as a failed
+                                    // CodeExecutionResult rather than aborting
+                                    // the whole agent run.
+                                    let msg = last_err
+                                        .map(|e| e.to_string())
+                                        .unwrap_or_else(|| "code executor failed".into());
+                                    result_parts.push(Part::CodeExecutionResult(
+                                        crate::genai_types::part::CodeExecutionResult {
+                                            outcome:
+                                                crate::genai_types::part::Outcome::OutcomeFailed,
+                                            output: Some(msg),
                                         },
-                                    )
-                                    .await?;
-                                let outcome = if result.stderr.is_empty() {
-                                    crate::genai_types::part::Outcome::OutcomeOk
-                                } else {
-                                    crate::genai_types::part::Outcome::OutcomeFailed
-                                };
-                                result_parts.push(Part::CodeExecutionResult(
-                                    crate::genai_types::part::CodeExecutionResult {
-                                        outcome,
-                                        output: Some(result.combined_output()),
-                                    },
-                                ));
+                                    ));
+                                }
                             }
                             let code_result_event = Event::new(
                                 me.name.clone(),
@@ -200,6 +266,7 @@ impl BaseAgent for LlmAgent {
                 let mut transfer: Option<String> = None;
                 let mut escalate = false;
                 let mut long_running_any = false;
+                let mut long_running_tool_ids = Vec::new();
                 for fc in &calls {
                     let tool = req
                         .tools_dict
@@ -227,22 +294,36 @@ impl BaseAgent for LlmAgent {
                     if tctx.escalate { escalate = true; }
                     let will_continue = if tool.is_long_running() || tctx.long_running {
                         long_running_any = true;
+                        long_running_tool_ids.push(
+                            fc.id.clone().unwrap_or_else(|| fc.name.clone())
+                        );
                         Some(true)
                     } else if auth_pending {
                         // Bubble the pending auth response back via will_continue
                         // so the caller knows to resume after consent.
                         long_running_any = true;
+                        long_running_tool_ids.push(
+                            fc.id.clone().unwrap_or_else(|| fc.name.clone())
+                        );
                         Some(true)
                     } else {
                         None
                     };
+                    let response_name = if auth_pending {
+                        crate::auth::REQUEST_CREDENTIAL_FUNCTION_NAME.to_string()
+                    } else {
+                        fc.name.clone()
+                    };
                     tool_responses.push(
-                        FunctionResponse { id: fc.id.clone(), name: fc.name.clone(), response: value, will_continue, scheduling: None }
+                        FunctionResponse { id: fc.id.clone(), name: response_name, response: value, will_continue, scheduling: None }
                     );
                 }
 
                 // Emit a tool-response event.
-                let tool_event = function_response_event(&me.name, &ctx2.invocation_id, tool_responses.clone());
+                let mut tool_event = function_response_event(&me.name, &ctx2.invocation_id, tool_responses.clone());
+                if !long_running_tool_ids.is_empty() {
+                    tool_event.long_running_tool_ids = Some(long_running_tool_ids);
+                }
                 {
                     let mut sess = ctx2.session.lock();
                     sess.events.push(tool_event.clone());
@@ -332,6 +413,24 @@ async fn resolve_instruction(i: &Instruction, ctx: &ReadonlyContext) -> Result<S
     }
 }
 
+/// Walk `event.response.content.parts` and assign a synthesized id to any
+/// `FunctionCall` part that lacks one (Gemini may omit `id`). The mutation
+/// must run **before** the event is persisted into `session.events` so every
+/// downstream consumer (replay matcher, auth preprocessor, FunctionResponse
+/// id, ToolContext.function_call_id) observes the same value.
+fn ensure_function_call_ids(event: &mut Event) {
+    let Some(content) = event.response.content.as_mut() else {
+        return;
+    };
+    for part in &mut content.parts {
+        if let Part::FunctionCall(fc) = part {
+            if fc.id.is_none() {
+                fc.id = Some(format!("adk-fc-{}", uuid::Uuid::new_v4()));
+            }
+        }
+    }
+}
+
 fn response_to_event(author: &str, invocation_id: &str, resp: LlmResponse) -> Event {
     Event {
         id: Event::new_id(),
@@ -371,6 +470,58 @@ fn function_response_event(
         partial: None,
         turn_complete: None,
     }
+}
+
+async fn replay_resumed_tool_calls(
+    ctx: &Arc<InvocationContext>,
+    req: &LlmRequest,
+) -> Result<Vec<FunctionResponse>> {
+    let ids = resumed_tool_call_ids(ctx);
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = ctx.session.lock().events.clone();
+    let mut responses = Vec::new();
+    for id in ids {
+        let Some(fc) = events
+            .iter()
+            .flat_map(Event::function_calls)
+            .find(|fc| fc.id.as_deref() == Some(id.as_str()))
+        else {
+            continue;
+        };
+        let tool = req
+            .tools_dict
+            .get(&fc.name)
+            .cloned()
+            .ok_or_else(|| Error::from(crate::error::ToolError::Unknown(fc.name.clone())))?;
+        let mut tctx = ToolContext::new(ctx.clone());
+        tctx.function_call_id = fc.id.clone();
+        let (auth_pending, value) =
+            resolve_auth_and_run(tool.as_ref(), fc.args.clone(), &mut tctx).await?;
+        let name = if auth_pending {
+            crate::auth::REQUEST_CREDENTIAL_FUNCTION_NAME.to_string()
+        } else {
+            fc.name.clone()
+        };
+        responses.push(FunctionResponse {
+            id: fc.id.clone(),
+            name,
+            response: value,
+            will_continue: auth_pending.then_some(true),
+            scheduling: None,
+        });
+    }
+    Ok(responses)
+}
+
+fn resumed_tool_call_ids(ctx: &InvocationContext) -> Vec<String> {
+    ctx.attributes
+        .lock()
+        .get("auth.resumed_tool_call_ids")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// Extract `(language, code)` from any `ExecutableCode` parts in the event.
@@ -632,5 +783,65 @@ mod tests {
             events[0].response.content.as_ref().unwrap().text_concat(),
             "hello there"
         );
+    }
+
+    /// Regression for P1#1: a model response carrying a `FunctionCall` with
+    /// `id == None` (Gemini's default) must get a synthesised stable id
+    /// before being persisted into the session. Without it, auth-pending
+    /// tool calls can never be resumed after consent.
+    #[test]
+    fn ensure_function_call_ids_synthesises_ids() {
+        use crate::genai_types::{Content, FunctionCall, Part, Role};
+
+        let mut event = Event::new(
+            "agent",
+            LlmResponse {
+                content: Some(Content {
+                    role: Role::Model,
+                    parts: vec![
+                        Part::FunctionCall(FunctionCall::new(
+                            "without_id",
+                            serde_json::json!({"x": 1}),
+                        )),
+                        Part::FunctionCall(
+                            FunctionCall::new("with_id", serde_json::json!({}))
+                                .with_id("pre-existing"),
+                        ),
+                    ],
+                }),
+                ..Default::default()
+            },
+        );
+        ensure_function_call_ids(&mut event);
+
+        let calls = event.function_calls();
+        assert_eq!(calls.len(), 2);
+
+        // First call: missing id should be filled with a stable synthesised value.
+        let first = calls.iter().find(|fc| fc.name == "without_id").unwrap();
+        let id = first.id.as_deref().expect("synthesised id");
+        assert!(
+            id.starts_with("adk-fc-"),
+            "synthesised id should be prefixed for traceability, got {id:?}"
+        );
+        // Same event re-serialised has the same id (mutation is in-place).
+        assert_eq!(
+            event
+                .response
+                .content
+                .as_ref()
+                .unwrap()
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    Part::FunctionCall(fc) => fc.id.clone(),
+                    _ => None,
+                }),
+            Some(id.to_string())
+        );
+
+        // Second call: pre-existing id is preserved.
+        let second = calls.iter().find(|fc| fc.name == "with_id").unwrap();
+        assert_eq!(second.id.as_deref(), Some("pre-existing"));
     }
 }

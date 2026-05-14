@@ -72,8 +72,19 @@ impl AuthPreprocessor {
 
             // The function call id is what the runner originally synthesised.
             // Toolset auth requests use a known prefix so we can tell them
-            // apart from per-tool auth.
-            let id = fr.id.clone().unwrap_or_default();
+            // apart from per-tool auth. We *require* an id: the agent
+            // synthesises one for id-less Gemini calls before persisting the
+            // event, so a missing id here means a malformed caller — log and
+            // drop rather than match against `""` (which would silently fail
+            // to resume).
+            let Some(id) = fr.id.clone().filter(|s| !s.is_empty()) else {
+                tracing::warn!(
+                    "auth preprocessor: dropping adk_request_credential response with no \
+                     function_call_id; agent emits a synthesised id for every call, so this \
+                     usually means a malformed user-side response"
+                );
+                continue;
+            };
             if id.starts_with(TOOLSET_AUTH_CREDENTIAL_ID_PREFIX) {
                 out.resumed_toolset_ids.push(id);
             } else {

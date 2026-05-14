@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id          TEXT    NOT NULL,
   id               TEXT    NOT NULL,
   state            TEXT    NOT NULL DEFAULT '{}',
-  last_update_time REAL NOT NULL DEFAULT 0,
+  last_update_time DOUBLE PRECISION NOT NULL DEFAULT 0,
   PRIMARY KEY (app_name, user_id, id)
 );
 
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS events (
   invocation_id TEXT    NOT NULL,
   author        TEXT    NOT NULL,
   branch        TEXT,
-  timestamp     REAL NOT NULL,
+  timestamp     DOUBLE PRECISION NOT NULL,
   payload       TEXT    NOT NULL,
   PRIMARY KEY (app_name, user_id, session_id, id)
 );

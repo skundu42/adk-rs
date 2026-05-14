@@ -42,7 +42,7 @@ pub use model::{Model, ModelRegistry};
 pub use run_config::{RunConfig, StreamingMode};
 pub use services::{
     ArtifactService, CredentialService, GetSessionConfig, ListSessionsResponse, MemoryService,
-    SessionService, SessionsMeta,
+    SessionService, SessionsMeta, apply_event_to_session,
 };
 pub use session::{Session, SessionId, SessionMeta};
 pub use state::{State, StateDelta, StateScope};

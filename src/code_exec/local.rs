@@ -93,10 +93,14 @@ impl CodeExecutor for LocalCodeExecutor {
             .map_err(|e| Error::other(format!("spawn {}: {e}", self.interpreter)))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(input.code.as_bytes())
-                .await
-                .map_err(|e| Error::other(format!("write stdin: {e}")))?;
+            // Swallow `BrokenPipe` — the child may exit before we finish
+            // writing (e.g. syntax error on the first line). Real I/O
+            // failures still propagate.
+            if let Err(e) = stdin.write_all(input.code.as_bytes()).await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(Error::other(format!("write stdin: {e}")));
+                }
+            }
             // Drop stdin so the child sees EOF.
             drop(stdin);
         }
@@ -111,10 +115,16 @@ impl CodeExecutor for LocalCodeExecutor {
         let output = match timeout(self.timeout, wait).await {
             Ok(r) => r?,
             Err(_) => {
+                // Process is dropped here → kill_on_drop fires.
                 return Ok(CodeExecutionResult {
                     stdout: String::new(),
-                    stderr: format!("code execution timed out after {}s", self.timeout.as_secs()),
+                    stderr: format!(
+                        "{} execution timed out after {}s",
+                        self.interpreter,
+                        self.timeout.as_secs()
+                    ),
                     output_files: Vec::new(),
+                    exit_code: None,
                 });
             }
         };
@@ -125,6 +135,7 @@ impl CodeExecutor for LocalCodeExecutor {
             stdout,
             stderr,
             output_files: Vec::new(),
+            exit_code: output.status.code(),
         })
     }
 }

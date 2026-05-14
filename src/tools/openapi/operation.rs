@@ -58,23 +58,6 @@ pub enum ParamLocation {
     Body,
 }
 
-impl HttpMethod {
-    /// As a lowercase method name (`"get"`, `"post"`, ...).
-    #[must_use]
-    pub fn as_lower(self) -> &'static str {
-        match self {
-            Self::Get => "get",
-            Self::Post => "post",
-            Self::Put => "put",
-            Self::Patch => "patch",
-            Self::Delete => "delete",
-            Self::Head => "head",
-            Self::Options => "options",
-            Self::Trace => "trace",
-        }
-    }
-}
-
 /// One parameter on an operation (path/query/header/cookie/body).
 #[derive(Debug, Clone)]
 pub struct ApiParameter {

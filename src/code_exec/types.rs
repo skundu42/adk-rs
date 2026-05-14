@@ -54,6 +54,12 @@ pub struct CodeExecutionResult {
     pub stderr: String,
     /// Files produced (e.g. plots written to disk).
     pub output_files: Vec<ExecFile>,
+    /// Process exit code, when one is available. `None` means the executor
+    /// could not determine an exit code (e.g. the process was killed by the
+    /// timeout watchdog before it had a chance to exit). Callers should
+    /// treat `Some(0)` as success, `Some(_)` as failure, and `None` as
+    /// "unknown — inspect `stderr`".
+    pub exit_code: Option<i32>,
 }
 
 impl CodeExecutionResult {
@@ -67,6 +73,19 @@ impl CodeExecutionResult {
             self.stderr.clone()
         } else {
             format!("{}\n--- stderr ---\n{}", self.stdout, self.stderr)
+        }
+    }
+
+    /// True when the executor reports a clean exit (`exit_code == Some(0)`)
+    /// **or** when no exit code is available and `stderr` is empty.
+    /// Routing of `Outcome::OutcomeOk`/`OutcomeFailed` should use this rather
+    /// than the v0.2-initial `stderr.is_empty()` heuristic.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        match self.exit_code {
+            Some(0) => true,
+            Some(_) => false,
+            None => self.stderr.is_empty(),
         }
     }
 }

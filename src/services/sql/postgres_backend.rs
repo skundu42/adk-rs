@@ -10,7 +10,6 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use crate::core::services::new_session_id;
 use crate::core::{
     Event, GetSessionConfig, ListSessionsResponse, Session, SessionMeta, SessionService, State,
-    StateScope,
 };
 use crate::error::{Error, Result, ServiceError};
 
@@ -69,25 +68,80 @@ impl SessionService for SqlSessionService {
         id: Option<&str>,
     ) -> Result<Session> {
         let sid = id.map(str::to_string).unwrap_or_else(new_session_id);
-        let state_json = state
-            .as_ref()
-            .map(|s| serde_json::to_string(s).unwrap_or_else(|_| "{}".into()))
-            .unwrap_or_else(|| "{}".into());
         let now = crate::core::session::now_secs();
+        // Route initial state by scope. App/user keys land in the dedicated
+        // tables so they're visible to other sessions; session keys go on
+        // this session's row; temp keys are invocation-local and dropped.
+        let (app_delta, user_delta, session_delta) = match &state {
+            Some(st) => {
+                let (a, u, s, _t) = State::partition_by_scope(&st.map);
+                (a, u, s)
+            }
+            None => Default::default(),
+        };
+        let session_state = State::from_iter(session_delta.clone());
+        let state_json = serde_json::to_string(&session_state)?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
         sqlx::query("INSERT INTO sessions (app_name, user_id, id, state, last_update_time) VALUES ($1, $2, $3, $4, $5)")
             .bind(app_name)
             .bind(user_id)
             .bind(&sid)
             .bind(&state_json)
             .bind(now)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
-        let mut s = Session::new(app_name, user_id, sid);
-        if let Some(st) = state {
-            s.state = st;
+        for (k, v) in &app_delta {
+            let vj = serde_json::to_string(v)?;
+            sqlx::query(
+                "INSERT INTO app_state (app_name, key, value) VALUES ($1, $2, $3) \
+                 ON CONFLICT (app_name, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(app_name)
+            .bind(k)
+            .bind(&vj)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
         }
+        for (k, v) in &user_delta {
+            let vj = serde_json::to_string(v)?;
+            sqlx::query(
+                "INSERT INTO user_state (app_name, user_id, key, value) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (app_name, user_id, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(app_name)
+            .bind(user_id)
+            .bind(k)
+            .bind(&vj)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+
+        let mut s = Session::new(app_name, user_id, sid);
         s.last_update_time = now;
+        // Returned `state` is the merged view (matching get_session): the
+        // caller sees the non-temp keys they passed in.
+        let mut merged = State::new();
+        for (k, v) in app_delta {
+            merged.set(k, v);
+        }
+        for (k, v) in user_delta {
+            merged.set(k, v);
+        }
+        for (k, v) in session_delta {
+            merged.set(k, v);
+        }
+        s.state = merged;
         Ok(s)
     }
 
@@ -115,7 +169,42 @@ impl SessionService for SqlSessionService {
         let last: f64 = row
             .try_get(1)
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
-        let state: State = serde_json::from_str(&state_json).unwrap_or_default();
+        let mut state: State = serde_json::from_str(&state_json).unwrap_or_default();
+
+        // Overlay app + user scoped state. Session-scope keys win conflicts.
+        let app_kv = sqlx::query("SELECT key, value FROM app_state WHERE app_name = $1")
+            .bind(app_name)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        let user_kv =
+            sqlx::query("SELECT key, value FROM user_state WHERE app_name = $1 AND user_id = $2")
+                .bind(app_name)
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        let mut overlay = State::new();
+        for r in app_kv {
+            let k: String = r.try_get(0).unwrap_or_default();
+            let v_json: String = r.try_get(1).unwrap_or_else(|_| "null".into());
+            overlay.set(
+                k,
+                serde_json::from_str(&v_json).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        for r in user_kv {
+            let k: String = r.try_get(0).unwrap_or_default();
+            let v_json: String = r.try_get(1).unwrap_or_else(|_| "null".into());
+            overlay.set(
+                k,
+                serde_json::from_str(&v_json).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        for (k, v) in state.iter() {
+            overlay.set(k.clone(), v.clone());
+        }
+        state = overlay;
 
         let mut q = String::from(
             "SELECT payload, timestamp FROM events WHERE app_name = $1 AND user_id = $2 AND session_id = $3",
@@ -212,31 +301,33 @@ impl SessionService for SqlSessionService {
         if event.partial == Some(true) {
             return Ok(event);
         }
-        for (k, v) in &event.actions.state_delta {
-            if StateScope::of(k) == StateScope::Temp {
-                session.state.set(k.clone(), v.clone());
-            }
+        // Route by scope.
+        let (app_delta, user_delta, session_delta, temp_delta) =
+            State::partition_by_scope(&event.actions.state_delta);
+
+        // Live in-memory: apply ALL non-temp + temp (temp lives for the
+        // invocation; persisted state never carries it).
+        for (k, v) in &temp_delta {
+            session.state.set(k.clone(), v.clone());
         }
-        event.actions.state_delta = State::trim_temp_keys(&event.actions.state_delta);
-        session.state.apply(&event.actions.state_delta);
+        session.state.apply(&app_delta);
+        session.state.apply(&user_delta);
+        session.state.apply(&session_delta);
         session.last_update_time = crate::core::session::now_secs();
         session.events.push(event.clone());
 
+        // The persisted event carries only session-scope deltas (app/user
+        // are routed to their tables; temp is invocation-local).
+        event.actions.state_delta = session_delta.clone();
         let payload = serde_json::to_string(&event)?;
-        let persisted_state: State = State::from_iter(
-            session
-                .state
-                .iter()
-                .filter(|(k, _)| StateScope::of(k) != StateScope::Temp)
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
-        let state_json = serde_json::to_string(&persisted_state)?;
 
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+
+        // 1. INSERT event row.
         sqlx::query("INSERT INTO events (app_name, user_id, session_id, id, invocation_id, author, branch, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
             .bind(&session.app_name)
             .bind(&session.user_id)
@@ -250,18 +341,104 @@ impl SessionService for SqlSessionService {
             .execute(&mut *tx)
             .await
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
-        sqlx::query("UPDATE sessions SET state = $1, last_update_time = $2 WHERE app_name = $3 AND user_id = $4 AND id = $5")
-            .bind(&state_json)
-            .bind(session.last_update_time)
+
+        // 2. Read-merge-write the session-scope state column under
+        //    `SELECT ... FOR UPDATE` (row-level lock). Fixes the P1#2
+        //    "last-writer-wins" race that otherwise lets concurrent invocations
+        //    clobber each other's keys.
+        if session_delta.is_empty() {
+            sqlx::query("UPDATE sessions SET last_update_time = $1 WHERE app_name = $2 AND user_id = $3 AND id = $4")
+                .bind(session.last_update_time)
+                .bind(&session.app_name)
+                .bind(&session.user_id)
+                .bind(&session.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        } else {
+            let current_json: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM sessions WHERE app_name = $1 AND user_id = $2 AND id = $3 FOR UPDATE",
+            )
             .bind(&session.app_name)
             .bind(&session.user_id)
             .bind(&session.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+            let mut current: State = current_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            current.apply(&session_delta);
+            let state_json = serde_json::to_string(&current)?;
+            sqlx::query("UPDATE sessions SET state = $1, last_update_time = $2 WHERE app_name = $3 AND user_id = $4 AND id = $5")
+                .bind(&state_json)
+                .bind(session.last_update_time)
+                .bind(&session.app_name)
+                .bind(&session.user_id)
+                .bind(&session.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        }
+
+        // 3. Upsert app_state / user_state for routed keys.
+        for (k, v) in &app_delta {
+            let vj = serde_json::to_string(v)?;
+            sqlx::query(
+                "INSERT INTO app_state (app_name, key, value) VALUES ($1, $2, $3) \
+                 ON CONFLICT (app_name, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(&session.app_name)
+            .bind(k)
+            .bind(&vj)
             .execute(&mut *tx)
             .await
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        }
+        for (k, v) in &user_delta {
+            let vj = serde_json::to_string(v)?;
+            sqlx::query(
+                "INSERT INTO user_state (app_name, user_id, key, value) VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (app_name, user_id, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(&session.app_name)
+            .bind(&session.user_id)
+            .bind(k)
+            .bind(&vj)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        }
+
         tx.commit()
             .await
             .map_err(|e| Error::Service(ServiceError::Backend(e.to_string())))?;
+        Ok(event)
+    }
+
+    /// Race-free read-modify-write. Mutates the live session under one lock
+    /// then writes through to PostgreSQL inside a transaction with
+    /// `SELECT ... FOR UPDATE` on the session row, so concurrent writers no
+    /// longer clobber each other's state keys (fix for P1#2). `app:` /
+    /// `user:` scoped deltas go to dedicated tables (fix for P1#3).
+    async fn append_event_locked(
+        &self,
+        session_lock: &std::sync::Arc<parking_lot::Mutex<Session>>,
+        event: Event,
+    ) -> Result<Event> {
+        if event.partial == Some(true) {
+            return Ok(event);
+        }
+        let (event, mut snapshot) = {
+            let mut sess = session_lock.lock();
+            let event = crate::core::services::apply_event_to_session(&mut sess, event);
+            (event, sess.clone())
+        };
+        if snapshot.events.last().map(|e| &e.id) == Some(&event.id) {
+            snapshot.events.pop();
+        }
+        let _ = self.append_event(&mut snapshot, event.clone()).await?;
         Ok(event)
     }
 }

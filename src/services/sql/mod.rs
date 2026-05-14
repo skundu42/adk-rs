@@ -1,17 +1,22 @@
 //! SQL-backed [`SessionService`](crate::core::SessionService) over `sqlx`.
 //!
 //! Features:
-//! * `sqlite` (default) — file or in-memory SQLite.
+//! * `sqlite` — file or in-memory SQLite.
 //! * `postgres` — PostgreSQL via `postgres://` URLs.
 //!
-//! At most one backend feature should be enabled at a time. Schema lives
-//! under `migrations/`.
+//! If both backend features are enabled, both concrete aliases are exported
+//! and the compatibility `SqlSessionService` alias points at SQLite. Schema
+//! lives under `migrations/`.
 
 #[cfg(feature = "postgres")]
-#[cfg_attr(feature = "sqlite", allow(dead_code, unreachable_pub))]
 mod postgres_backend;
 #[cfg(feature = "sqlite")]
 mod sqlite_backend;
+
+#[cfg(feature = "postgres")]
+pub use postgres_backend::SqlSessionService as PostgresSessionService;
+#[cfg(feature = "sqlite")]
+pub use sqlite_backend::SqlSessionService as SqliteSessionService;
 
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 pub use postgres_backend::SqlSessionService;
