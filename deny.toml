@@ -1,6 +1,10 @@
 [advisories]
 yanked = "warn"
-ignore = []
+ignore = [
+    # `time` >=0.3.47 fixes RUSTSEC-2026-0009 but requires Rust 1.88.
+    # Keep this ignored while the crate's MSRV and CI matrix remain on 1.85.
+    "RUSTSEC-2026-0009",
+]
 
 [licenses]
 allow = [

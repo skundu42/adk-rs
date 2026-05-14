@@ -32,7 +32,6 @@ dependencies = [
  "pin-project-lite",
  "rand 0.8.6",
  "reqwest",
- "rsa",
  "schemars 0.8.22",
  "serde",
  "serde_json",

@@ -7,7 +7,7 @@
 //!
 //! The OAuth2 wiring (`manager`, `handler`, `exchanger`, `refresher`,
 //! `preprocessor`) lives behind `feature = "auth"` because it pulls
-//! `oauth2`, `jsonwebtoken`, `rsa`, and `reqwest`.
+//! `oauth2`, `jsonwebtoken`, and `reqwest`.
 
 pub mod config;
 pub mod credential;
