@@ -25,6 +25,8 @@ pub mod manager;
 pub mod preprocessor;
 #[cfg(feature = "auth")]
 pub mod refresher;
+#[cfg(feature = "auth")]
+mod security;
 
 pub use config::AuthConfig;
 pub use credential::{

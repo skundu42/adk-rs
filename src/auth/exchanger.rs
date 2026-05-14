@@ -18,6 +18,7 @@ use crate::auth::config::AuthConfig;
 use crate::auth::credential::{AuthCredential, AuthCredentialType, OAuth2Auth, ServiceAccountAuth};
 use crate::auth::handler::AuthHandler;
 use crate::auth::scheme::AuthScheme;
+use crate::auth::security::secure_token_endpoint_url;
 use crate::error::{Error, Result};
 
 /// One credential exchange step.
@@ -172,17 +173,21 @@ async fn client_credentials_exchange(
         .token_uri
         .as_deref()
         .ok_or_else(|| Error::config("OAuth2Auth.token_uri is required for client_credentials"))?;
+    let token_url = secure_token_endpoint_url(token_uri, "OAuth2Auth.token_uri")?;
     let secret = oauth2
         .client_secret
         .as_deref()
         .ok_or_else(|| Error::config("client_secret is required for client_credentials"))?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| Error::other(format!("reqwest build: {e}")))?;
     let mut form: Vec<(&str, String)> = vec![("grant_type", "client_credentials".into())];
     if !oauth2.scopes.is_empty() {
         form.push(("scope", oauth2.scopes.join(" ")));
     }
     let resp = client
-        .post(token_uri)
+        .post(token_url)
         .basic_auth(&oauth2.client_id, Some(secret))
         .form(&form)
         .send()
@@ -263,6 +268,7 @@ async fn sign_and_post_jwt(
     if sa.token_uri.is_empty() {
         return Err(Error::config("ServiceAccountAuth.token_uri is required"));
     }
+    let token_url = secure_token_endpoint_url(&sa.token_uri, "ServiceAccountAuth.token_uri")?;
 
     #[derive(Serialize)]
     struct Claims<'a> {
@@ -280,7 +286,7 @@ async fn sign_and_post_jwt(
     let exp = now + 3600;
     let claims = Claims {
         iss: &sa.client_email,
-        aud: &sa.token_uri,
+        aud: token_url.as_str(),
         iat: now,
         exp,
         scope: if sa.scopes.is_empty() {
@@ -299,9 +305,12 @@ async fn sign_and_post_jwt(
     let assertion =
         encode(&header, &claims, &key).map_err(|e| Error::other(format!("JWT encode: {e}")))?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| Error::other(format!("reqwest build: {e}")))?;
     let resp = client
-        .post(&sa.token_uri)
+        .post(token_url)
         .form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", assertion.as_str()),
@@ -386,6 +395,37 @@ mod tests {
         assert_eq!(
             out.service_account.unwrap().access_token.as_deref(),
             Some("baked")
+        );
+    }
+
+    #[tokio::test]
+    async fn client_credentials_rejects_non_https_token_uri() {
+        let err = client_credentials_exchange(&OAuth2Auth {
+            client_id: "id".into(),
+            client_secret: Some("secret".into()),
+            token_uri: Some("http://example.com/token".into()),
+            ..OAuth2Auth::default()
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must use https"));
+    }
+
+    #[tokio::test]
+    async fn service_account_rejects_non_https_token_uri_before_signing() {
+        let err = sign_and_post_jwt(&ServiceAccountAuth {
+            private_key: "not a valid private key".into(),
+            client_email: "svc@example.iam.gserviceaccount.com".into(),
+            token_uri: "http://example.com/token".into(),
+            ..ServiceAccountAuth::default()
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must use https"),
+            "expected token_uri validation before JWT signing, got: {err}"
         );
     }
 

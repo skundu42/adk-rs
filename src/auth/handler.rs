@@ -13,6 +13,7 @@ use oauth2::{
 };
 
 use crate::auth::credential::OAuth2Auth;
+use crate::auth::security::secure_token_endpoint_url;
 use crate::error::{Error, Result};
 
 type ConfiguredClient =
@@ -43,6 +44,7 @@ impl AuthHandler {
             .redirect_uri
             .as_deref()
             .ok_or_else(|| Error::config("OAuth2Auth.redirect_uri is required"))?;
+        let token_url = secure_token_endpoint_url(token_uri, "OAuth2Auth.token_uri")?;
 
         let mut client = BasicClient::new(ClientId::new(oauth2.client_id.clone()))
             .set_auth_uri(
@@ -50,7 +52,7 @@ impl AuthHandler {
                     .map_err(|e| Error::config(format!("invalid auth_uri: {e}")))?,
             )
             .set_token_uri(
-                TokenUrl::new(token_uri.to_string())
+                TokenUrl::new(token_url.to_string())
                     .map_err(|e| Error::config(format!("invalid token_uri: {e}")))?,
             );
         if let Some(secret) = oauth2.client_secret.as_deref() {
@@ -193,5 +195,15 @@ mod tests {
         assert!(url.contains("scope=read"));
         assert!(!state.is_empty());
         assert!(!verifier.is_empty());
+    }
+
+    #[test]
+    fn from_oauth2_rejects_non_https_token_uri() {
+        let mut oauth2 = fake_oauth2();
+        oauth2.token_uri = Some("http://example.com/token".into());
+
+        let err = AuthHandler::from_oauth2(&oauth2).unwrap_err();
+
+        assert!(err.to_string().contains("must use https"));
     }
 }
