@@ -143,7 +143,15 @@ impl BaseAgent for LlmAgent {
                 ctx2.check_and_inc_llm_call()?;
                 debug!("LLM call iteration {}", _iter);
                 let resp = me.model.generate_content(req.clone()).await?;
-                let event = response_to_event(&me.name, &ctx2.invocation_id, resp.clone());
+                let mut event = response_to_event(&me.name, &ctx2.invocation_id, resp.clone());
+
+                // Gemini may omit `FunctionCall.id`. Synthesize a stable id
+                // for any id-less call BEFORE pushing the event into the
+                // session so every downstream consumer (session.events,
+                // ToolContext, FunctionResponse, replay matcher, auth
+                // preprocessor) sees the same value. Without this, auth-pending
+                // tool calls cannot be resumed after consent.
+                ensure_function_call_ids(&mut event);
 
                 // Persist on session.
                 {
@@ -402,6 +410,24 @@ async fn resolve_instruction(i: &Instruction, ctx: &ReadonlyContext) -> Result<S
     match i {
         Instruction::Static(s) => Ok(s.clone()),
         Instruction::Dynamic(f) => f(ctx).await,
+    }
+}
+
+/// Walk `event.response.content.parts` and assign a synthesized id to any
+/// `FunctionCall` part that lacks one (Gemini may omit `id`). The mutation
+/// must run **before** the event is persisted into `session.events` so every
+/// downstream consumer (replay matcher, auth preprocessor, FunctionResponse
+/// id, ToolContext.function_call_id) observes the same value.
+fn ensure_function_call_ids(event: &mut Event) {
+    let Some(content) = event.response.content.as_mut() else {
+        return;
+    };
+    for part in &mut content.parts {
+        if let Part::FunctionCall(fc) = part {
+            if fc.id.is_none() {
+                fc.id = Some(format!("adk-fc-{}", uuid::Uuid::new_v4()));
+            }
+        }
     }
 }
 
@@ -757,5 +783,65 @@ mod tests {
             events[0].response.content.as_ref().unwrap().text_concat(),
             "hello there"
         );
+    }
+
+    /// Regression for P1#1: a model response carrying a `FunctionCall` with
+    /// `id == None` (Gemini's default) must get a synthesised stable id
+    /// before being persisted into the session. Without it, auth-pending
+    /// tool calls can never be resumed after consent.
+    #[test]
+    fn ensure_function_call_ids_synthesises_ids() {
+        use crate::genai_types::{Content, FunctionCall, Part, Role};
+
+        let mut event = Event::new(
+            "agent",
+            LlmResponse {
+                content: Some(Content {
+                    role: Role::Model,
+                    parts: vec![
+                        Part::FunctionCall(FunctionCall::new(
+                            "without_id",
+                            serde_json::json!({"x": 1}),
+                        )),
+                        Part::FunctionCall(
+                            FunctionCall::new("with_id", serde_json::json!({}))
+                                .with_id("pre-existing"),
+                        ),
+                    ],
+                }),
+                ..Default::default()
+            },
+        );
+        ensure_function_call_ids(&mut event);
+
+        let calls = event.function_calls();
+        assert_eq!(calls.len(), 2);
+
+        // First call: missing id should be filled with a stable synthesised value.
+        let first = calls.iter().find(|fc| fc.name == "without_id").unwrap();
+        let id = first.id.as_deref().expect("synthesised id");
+        assert!(
+            id.starts_with("adk-fc-"),
+            "synthesised id should be prefixed for traceability, got {id:?}"
+        );
+        // Same event re-serialised has the same id (mutation is in-place).
+        assert_eq!(
+            event
+                .response
+                .content
+                .as_ref()
+                .unwrap()
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    Part::FunctionCall(fc) => fc.id.clone(),
+                    _ => None,
+                }),
+            Some(id.to_string())
+        );
+
+        // Second call: pre-existing id is preserved.
+        let second = calls.iter().find(|fc| fc.name == "with_id").unwrap();
+        assert_eq!(second.id.as_deref(), Some("pre-existing"));
     }
 }

@@ -100,6 +100,39 @@ impl State {
         }
     }
 
+    /// Split a delta by scope. Returns
+    /// `(app_keys, user_keys, session_keys, temp_keys)`. Useful for backends
+    /// that persist `app:` / `user:` keys to separate storage so they're
+    /// visible across sessions.
+    #[must_use]
+    pub fn partition_by_scope(
+        delta: &StateDelta,
+    ) -> (StateDelta, StateDelta, StateDelta, StateDelta) {
+        let (mut app, mut user, mut session, mut temp) = (
+            StateDelta::new(),
+            StateDelta::new(),
+            StateDelta::new(),
+            StateDelta::new(),
+        );
+        for (k, v) in delta {
+            match StateScope::of(k) {
+                StateScope::App => {
+                    app.insert(k.clone(), v.clone());
+                }
+                StateScope::User => {
+                    user.insert(k.clone(), v.clone());
+                }
+                StateScope::Session => {
+                    session.insert(k.clone(), v.clone());
+                }
+                StateScope::Temp => {
+                    temp.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        (app, user, session, temp)
+    }
+
     /// Number of keys.
     #[must_use]
     pub fn len(&self) -> usize {
