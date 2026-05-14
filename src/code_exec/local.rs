@@ -151,7 +151,6 @@ mod tests {
         LocalCodeExecutor::new()
             .with_interpreter("/bin/sh")
             .with_args(vec!["-s".into()])
-            .with_timeout(Duration::from_secs(5))
     }
 
     #[tokio::test]
@@ -169,8 +168,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.stdout.contains("hello"));
-        assert!(out.stderr.contains("err"));
+        assert!(
+            out.stdout.contains("hello"),
+            "expected stdout to contain hello, got {out:?}"
+        );
+        assert!(
+            out.stderr.contains("err"),
+            "expected stderr to contain err, got {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -181,7 +186,7 @@ mod tests {
             .execute_code(
                 &ctx,
                 CodeExecutionInput {
-                    code: "sleep 10\n".into(),
+                    code: "exec sleep 10\n".into(),
                     language: "shell".into(),
                     ..CodeExecutionInput::default()
                 },
