@@ -262,8 +262,7 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
     let r: WireResponse = serde_json::from_slice(body)
         .map_err(|e| ProviderError::Decode(format!("openai response: {e}")))?;
     let mut parts: Vec<Part> = Vec::new();
-    let mut finish_reason = None;
-    if let Some(choice) = r.choices.into_iter().next() {
+    let finish_reason = if let Some(choice) = r.choices.into_iter().next() {
         if let Some(text) = choice.message.content {
             if !text.is_empty() {
                 parts.push(Part::Text(text));
@@ -278,14 +277,16 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
                 args,
             }));
         }
-        finish_reason = match choice.finish_reason.as_deref() {
+        match choice.finish_reason.as_deref() {
             Some("stop") => Some(FinishReason::Stop),
             Some("length") => Some(FinishReason::MaxTokens),
             Some("tool_calls") => Some(FinishReason::Stop),
             Some("content_filter") => Some(FinishReason::Safety),
             _ => None,
-        };
-    }
+        }
+    } else {
+        None
+    };
     Ok(LlmResponse {
         model_version: r.model,
         content: Some(Content {

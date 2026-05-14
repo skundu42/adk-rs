@@ -1304,7 +1304,7 @@ mod tests {
     async fn serve_refuses_non_loopback_without_auth() {
         use std::net::{IpAddr, Ipv4Addr};
         let st = state(build_runner());
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let err = serve(addr, st).await.unwrap_err();
         assert!(err.to_string().contains("non-loopback"));
     }

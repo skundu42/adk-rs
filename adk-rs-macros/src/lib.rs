@@ -72,7 +72,7 @@ fn doc_comment(attrs: &[syn::Attribute]) -> String {
 
 #[proc_macro_attribute]
 /// `#[adk::tool]` — see crate docs.
-#[allow(clippy::match_on_vec_items)] // `inputs.len() != 2` is checked first
+#[allow(clippy::indexing_slicing)] // `inputs.len() != 2` is checked first
 pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let f = parse_macro_input!(item as ItemFn);
     let vis = &f.vis;
