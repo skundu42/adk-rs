@@ -188,7 +188,7 @@ impl App {
             } => {
                 let mut runners = HashMap::new();
                 for (name, agent) in &self.agents {
-                    runners.insert(name.clone(), Arc::new(self.runner_for(agent.clone())));
+                    runners.insert(name.clone(), Arc::new(self.runner_for(agent.clone())?));
                 }
                 let runners = Arc::new(runners);
                 let state = match auth_token {
@@ -247,17 +247,16 @@ impl App {
 
     fn build_runner(&self, agent_name: &str) -> crate::error::Result<Runner> {
         let agent = self.find_agent(agent_name)?;
-        Ok(self.runner_for(agent))
+        self.runner_for(agent)
     }
 
-    fn runner_for(&self, agent: Arc<dyn BaseAgent>) -> Runner {
+    fn runner_for(&self, agent: Arc<dyn BaseAgent>) -> crate::error::Result<Runner> {
         Runner::builder()
             .app_name(self.name.clone())
             .agent(agent)
             .session_service(Arc::new(InMemorySessionService::new()))
             .auto_create_session(true)
             .build()
-            .expect("Runner::build with default services must succeed")
     }
 }
 

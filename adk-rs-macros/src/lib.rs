@@ -74,6 +74,13 @@ fn doc_comment(attrs: &[syn::Attribute]) -> String {
 /// `#[adk::tool]` — see crate docs.
 pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let f = parse_macro_input!(item as ItemFn);
+    match tool_impl(f) {
+        Ok(ts) => ts,
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn tool_impl(f: ItemFn) -> syn::Result<TokenStream> {
     let vis = &f.vis;
     let name_ident = &f.sig.ident;
     let name_str = name_ident.to_string();
@@ -82,18 +89,20 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let description = doc_comment(&f.attrs);
 
     if f.sig.asyncness.is_none() {
-        return TokenStream::from(quote! {
-            compile_error!("#[adk_rs::tool] requires an async fn");
-        });
+        return Err(syn::Error::new_spanned(
+            f.sig.fn_token,
+            "#[adk_rs::tool] requires an async fn",
+        ));
     }
 
     // Inspect arguments: expect (args: ArgsType, ctx: &mut ToolContext)
     let mut inputs = f.sig.inputs.iter();
     let (Some(arg_input), Some(ctx_input), None) = (inputs.next(), inputs.next(), inputs.next())
     else {
-        return TokenStream::from(quote! {
-            compile_error!("#[adk_rs::tool] requires exactly two args: (args: T, ctx: &mut ToolContext)");
-        });
+        return Err(syn::Error::new_spanned(
+            &f.sig.inputs,
+            "#[adk_rs::tool] requires exactly two args: (args: T, ctx: &mut ToolContext)",
+        ));
     };
     let PatType {
         pat: arg_pat,
@@ -101,18 +110,20 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ..
     } = match arg_input {
         FnArg::Typed(p) => p.clone(),
-        FnArg::Receiver(_) => {
-            return TokenStream::from(quote! {
-                compile_error!("#[adk_rs::tool] doesn't support receivers");
-            });
+        FnArg::Receiver(r) => {
+            return Err(syn::Error::new_spanned(
+                r,
+                "#[adk_rs::tool] doesn't support receivers",
+            ));
         }
     };
     let arg_ident = match *arg_pat {
         Pat::Ident(ref id) => id.ident.clone(),
-        _ => {
-            return TokenStream::from(
-                quote! { compile_error!("first arg must be a simple identifier"); },
-            );
+        ref other => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "first arg must be a simple identifier",
+            ));
         }
     };
 
@@ -122,18 +133,20 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ..
     } = match ctx_input {
         FnArg::Typed(p) => p.clone(),
-        FnArg::Receiver(_) => {
-            return TokenStream::from(quote! {
-                compile_error!("#[adk_rs::tool] doesn't support receivers");
-            });
+        FnArg::Receiver(r) => {
+            return Err(syn::Error::new_spanned(
+                r,
+                "#[adk_rs::tool] doesn't support receivers",
+            ));
         }
     };
     let ctx_ident = match *ctx_pat {
         Pat::Ident(ref id) => id.ident.clone(),
-        _ => {
-            return TokenStream::from(
-                quote! { compile_error!("second arg must be a simple identifier"); },
-            );
+        ref other => {
+            return Err(syn::Error::new_spanned(
+                other,
+                "second arg must be a simple identifier",
+            ));
         }
     };
 
@@ -192,5 +205,5 @@ pub fn tool(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(expanded)
+    Ok(TokenStream::from(expanded))
 }
