@@ -13,8 +13,10 @@ use crate::genai_types::{
 pub(crate) struct WireRequest<'a> {
     pub model: &'a str,
     pub max_tokens: u32,
+    /// Plain string, or an array of text blocks when a `cache_control`
+    /// breakpoint is attached.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Value>,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
@@ -38,6 +40,8 @@ pub(crate) struct WireTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +55,12 @@ pub(crate) struct WireMessage {
 pub(crate) enum WireBlock {
     Text {
         text: String,
+    },
+    Image {
+        source: Value,
+    },
+    Document {
+        source: Value,
     },
     ToolUse {
         id: String,
@@ -72,11 +82,32 @@ pub(crate) enum WireToolResultPart {
 }
 
 pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a> {
-    let system = req
+    // Prompt caching: a `ContextCacheConfig` on the request becomes a
+    // `cache_control` breakpoint on the last stable-prefix block. Tools
+    // render before system on Anthropic's side, so a breakpoint on the
+    // system block caches both; with no system instruction it goes on the
+    // last tool instead.
+    let cache_control = req.cache_config.as_ref().map(|cfg| {
+        if cfg.ttl_seconds >= 3600 {
+            serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+        } else {
+            serde_json::json!({ "type": "ephemeral" })
+        }
+    });
+
+    let system_text = req
         .config
         .system_instruction
         .as_ref()
-        .map(crate::genai_types::Content::text_concat);
+        .map(crate::genai_types::Content::text_concat)
+        .filter(|t| !t.is_empty());
+    let system = match (&system_text, &cache_control) {
+        (Some(text), Some(cc)) => Some(serde_json::json!([
+            { "type": "text", "text": text, "cache_control": cc }
+        ])),
+        (Some(text), None) => Some(Value::String(text.clone())),
+        (None, _) => None,
+    };
 
     let mut messages = Vec::with_capacity(req.contents.len());
     for c in &req.contents {
@@ -89,7 +120,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         }
     }
 
-    let tools: Vec<WireTool> = req
+    let mut tools: Vec<WireTool> = req
         .config
         .tools
         .iter()
@@ -99,6 +130,12 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         })
         .flat_map(|decls| decls.iter().map(declaration_to_wire))
         .collect();
+    // No system block to carry the breakpoint: put it on the last tool.
+    if system_text.is_none() {
+        if let (Some(cc), Some(last)) = (&cache_control, tools.last_mut()) {
+            last.cache_control = Some(cc.clone());
+        }
+    }
 
     // Structured outputs: map the request schema to the Messages API's
     // native `output_config.format` (json_schema). The server then enforces
@@ -140,6 +177,7 @@ fn declaration_to_wire(d: &FunctionDeclaration) -> WireTool {
         name: d.name.clone(),
         description: d.description.clone(),
         input_schema: schema,
+        cache_control: None,
     }
 }
 
@@ -189,12 +227,56 @@ fn content_to_blocks(c: &Content) -> (&'static str, Vec<WireBlock>) {
                 }],
                 is_error: false,
             }),
-            // InlineData / FileData / ExecutableCode / CodeExecutionResult are
-            // not supported in v0.1; silently skip.
-            _ => {}
+            // Inline binary data: images and PDFs map to base64 sources.
+            Part::InlineData(d) if d.mime_type.starts_with("image/") => {
+                out.push(WireBlock::Image {
+                    source: serde_json::json!({
+                        "type": "base64",
+                        "media_type": d.mime_type,
+                        "data": d.data,
+                    }),
+                });
+            }
+            Part::InlineData(d) if d.mime_type == "application/pdf" => {
+                out.push(WireBlock::Document {
+                    source: serde_json::json!({
+                        "type": "base64",
+                        "media_type": d.mime_type,
+                        "data": d.data,
+                    }),
+                });
+            }
+            // File references: https URLs map to url sources.
+            Part::FileData(f) if f.file_uri.starts_with("https://") => {
+                let source = serde_json::json!({ "type": "url", "url": f.file_uri });
+                if f.mime_type.starts_with("image/") {
+                    out.push(WireBlock::Image { source });
+                } else {
+                    out.push(WireBlock::Document { source });
+                }
+            }
+            // Empty text/thought parts fell through the guard above: skip.
+            Part::Text(_) | Part::Thought(_) => {}
+            // Anything else is dropped loudly, not silently.
+            other => tracing::warn!(
+                part = %part_kind(other),
+                "dropping part unsupported by the Anthropic Messages API"
+            ),
         }
     }
     (role, out)
+}
+
+fn part_kind(p: &Part) -> &'static str {
+    match p {
+        Part::Text(_) => "text",
+        Part::Thought(_) => "thought",
+        Part::InlineData(_) => "inline_data",
+        Part::FileData(_) => "file_data",
+        Part::FunctionCall(_) => "function_call",
+        Part::FunctionResponse(_) => "function_response",
+        _ => "other",
+    }
 }
 
 fn random_id() -> String {
@@ -230,6 +312,10 @@ pub(crate) enum WireResponseBlock {
 pub(crate) struct WireUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
@@ -259,6 +345,21 @@ pub(crate) fn from_wire_response(r: WireResponse) -> LlmResponse {
         Some("tool_use") => Some(FinishReason::Stop),
         _ => None,
     };
+    let cache_read = r
+        .usage
+        .as_ref()
+        .and_then(|u| u.cache_read_input_tokens)
+        .unwrap_or(0);
+    let cache_written = r
+        .usage
+        .as_ref()
+        .and_then(|u| u.cache_creation_input_tokens)
+        .unwrap_or(0);
+    let cache_metadata =
+        (cache_read > 0 || cache_written > 0).then(|| crate::core::cache::CacheMetadata {
+            cache_name: "anthropic/prompt-cache".into(),
+            cache_hit: cache_read > 0,
+        });
     LlmResponse {
         model_version: r.model,
         content: Some(Content {
@@ -270,8 +371,10 @@ pub(crate) fn from_wire_response(r: WireResponse) -> LlmResponse {
             prompt_token_count: Some(u.input_tokens),
             candidates_token_count: Some(u.output_tokens),
             total_token_count: Some(u.input_tokens + u.output_tokens),
+            cached_content_token_count: u.cache_read_input_tokens.filter(|n| *n > 0),
             ..UsageMetadata::default()
         }),
+        cache_metadata,
         ..LlmResponse::default()
     }
 }
@@ -330,6 +433,127 @@ mod tests {
         let calls = r.function_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id.as_deref(), Some("tu-1"));
+    }
+
+    #[test]
+    fn inline_image_maps_to_image_block() {
+        use crate::genai_types::part::InlineData;
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: Role::User,
+            parts: vec![
+                Part::Text("what is this?".into()),
+                Part::InlineData(InlineData::from_bytes("image/png", b"px")),
+            ],
+        });
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        let blocks = w["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    }
+
+    #[test]
+    fn inline_pdf_maps_to_document_block() {
+        use crate::genai_types::part::InlineData;
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: Role::User,
+            parts: vec![Part::InlineData(InlineData::from_bytes(
+                "application/pdf",
+                b"%PDF",
+            ))],
+        });
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        assert_eq!(w["messages"][0]["content"][0]["type"], "document");
+    }
+
+    #[test]
+    fn https_file_maps_to_url_source() {
+        use crate::genai_types::part::FileData;
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: Role::User,
+            parts: vec![Part::FileData(FileData {
+                mime_type: "image/jpeg".into(),
+                file_uri: "https://example.com/cat.jpg".into(),
+                display_name: None,
+            })],
+        });
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        let block = &w["messages"][0]["content"][0];
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "url");
+        assert_eq!(block["source"]["url"], "https://example.com/cat.jpg");
+    }
+
+    #[test]
+    fn cache_config_adds_breakpoint_on_system() {
+        use crate::core::ContextCacheConfig;
+        let mut req = LlmRequest::default();
+        req.append_system_text("a long stable instruction");
+        req.cache_config = Some(ContextCacheConfig::default());
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        let sys = w["system"].as_array().unwrap();
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert!(sys[0]["cache_control"].get("ttl").is_none());
+    }
+
+    #[test]
+    fn cache_config_long_ttl_uses_one_hour() {
+        use crate::core::ContextCacheConfig;
+        let mut req = LlmRequest::default();
+        req.append_system_text("stable");
+        req.cache_config = Some(ContextCacheConfig {
+            ttl_seconds: 7200,
+            ..ContextCacheConfig::default()
+        });
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        assert_eq!(w["system"][0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn cache_config_without_system_lands_on_last_tool() {
+        use crate::core::ContextCacheConfig;
+        let mut req = LlmRequest::default();
+        req.config.tools.push(Tool::FunctionDeclarations(vec![
+            FunctionDeclaration::new("a", ""),
+            FunctionDeclaration::new("b", ""),
+        ]));
+        req.cache_config = Some(ContextCacheConfig::default());
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        assert!(w["tools"][0].get("cache_control").is_none());
+        assert_eq!(w["tools"][1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_usage_maps_to_cache_metadata() {
+        let body = json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cache_read_input_tokens": 8
+            }
+        });
+        let r = parse_response(body.to_string().as_bytes()).unwrap();
+        let meta = r.cache_metadata.unwrap();
+        assert!(meta.cache_hit);
+        assert_eq!(
+            r.usage_metadata.unwrap().cached_content_token_count,
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn no_cache_config_keeps_plain_string_system() {
+        let mut req = LlmRequest::default();
+        req.append_system_text("be brief");
+        let w = serde_json::to_value(to_wire(&req, "x")).unwrap();
+        assert_eq!(w["system"], "be brief");
     }
 
     #[test]

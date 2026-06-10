@@ -21,10 +21,15 @@ pub(crate) struct WireRequest<'a> {
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Successor to `max_tokens`; the only form reasoning models accept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,14 +43,57 @@ pub(crate) struct WireRequest<'a> {
 #[derive(Debug, Serialize)]
 pub(crate) struct WireMessage {
     pub role: &'static str,
+    /// Either a plain string or an array of content parts (text /
+    /// image_url) — the chat-completions content union.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<WireToolCall>,
+}
+
+/// Build the content union for a user message: a plain string when the
+/// content is text-only, an array of `text` / `image_url` parts otherwise.
+fn user_content(c: &Content) -> Value {
+    let has_media = c.parts.iter().any(|p| {
+        matches!(p, Part::InlineData(d) if d.mime_type.starts_with("image/"))
+            || matches!(p, Part::FileData(f)
+                if f.file_uri.starts_with("https://") && f.mime_type.starts_with("image/"))
+    });
+    if !has_media {
+        return Value::String(c.text_concat());
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    for p in &c.parts {
+        match p {
+            Part::Text(t) | Part::Thought(t) if !t.is_empty() => {
+                parts.push(serde_json::json!({ "type": "text", "text": t }));
+            }
+            Part::InlineData(d) if d.mime_type.starts_with("image/") => {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{};base64,{}", d.mime_type, d.data) },
+                }));
+            }
+            Part::FileData(f)
+                if f.file_uri.starts_with("https://") && f.mime_type.starts_with("image/") =>
+            {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": f.file_uri },
+                }));
+            }
+            Part::Text(_) | Part::Thought(_) => {}
+            other => tracing::warn!(
+                part = ?std::mem::discriminant(other),
+                "dropping part unsupported by the chat/completions API"
+            ),
+        }
+    }
+    Value::Array(parts)
 }
 
 #[derive(Debug, Serialize)]
@@ -83,7 +131,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         if !text.is_empty() {
             messages.push(WireMessage {
                 role: "system",
-                content: Some(text),
+                content: Some(Value::String(text)),
                 name: None,
                 tool_call_id: None,
                 tool_calls: vec![],
@@ -94,7 +142,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         match c.role {
             Role::User | Role::System => messages.push(WireMessage {
                 role: "user",
-                content: Some(c.text_concat()),
+                content: Some(user_content(c)),
                 name: None,
                 tool_call_id: None,
                 tool_calls: vec![],
@@ -123,7 +171,11 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
                 }
                 messages.push(WireMessage {
                     role: "assistant",
-                    content: if text.is_empty() { None } else { Some(text) },
+                    content: if text.is_empty() {
+                        None
+                    } else {
+                        Some(Value::String(text))
+                    },
                     name: None,
                     tool_call_id: None,
                     tool_calls: tcs,
@@ -135,7 +187,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
                         let body = serde_json::to_string(&fr.response).unwrap_or_default();
                         messages.push(WireMessage {
                             role: "tool",
-                            content: Some(body),
+                            content: Some(Value::String(body)),
                             name: Some(fr.name.clone()),
                             tool_call_id: fr.id.clone(),
                             tool_calls: vec![],
@@ -177,15 +229,32 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         _ => None,
     };
 
+    // Reasoning models (o-series, gpt-5 family) reject the deprecated
+    // `max_tokens` with a 400 and require `max_completion_tokens`. Older
+    // OpenAI-compatible servers (Ollama, older Azure api-versions) only know
+    // `max_tokens`, so pick per model family rather than always sending the
+    // new form.
+    let bare_model = model.split('/').next_back().unwrap_or(model);
+    let reasoning_family = ["o1", "o3", "o4", "gpt-5"]
+        .iter()
+        .any(|p| bare_model.starts_with(p));
+    let (max_tokens, max_completion_tokens) = if reasoning_family {
+        (None, req.config.max_output_tokens)
+    } else {
+        (req.config.max_output_tokens, None)
+    };
+
     WireRequest {
         model,
         messages,
         tools,
         temperature: req.config.temperature,
         top_p: req.config.top_p,
-        max_tokens: req.config.max_output_tokens,
+        max_tokens,
+        max_completion_tokens,
         stop: req.config.stop_sequences.clone(),
         stream: false,
+        stream_options: None,
         response_format,
         seed: req.config.seed,
         presence_penalty: req.config.presence_penalty,
@@ -343,6 +412,72 @@ mod tests {
         let r = parse_response(body.to_string().as_bytes()).unwrap();
         assert_eq!(r.content.unwrap().text_concat(), "hi");
         assert_eq!(r.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn reasoning_models_get_max_completion_tokens() {
+        let mut req = LlmRequest::default();
+        req.config.max_output_tokens = Some(1024);
+        // Chat-tier model: legacy field.
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o-mini")).unwrap();
+        assert_eq!(w["max_tokens"], 1024);
+        assert!(w.get("max_completion_tokens").is_none());
+        // Reasoning-tier models (with and without a routing prefix): new field.
+        for m in ["o3-mini", "gpt-5", "openai/o1-preview"] {
+            let w = serde_json::to_value(to_wire(&req, m)).unwrap();
+            assert!(w.get("max_tokens").is_none(), "{m} sent max_tokens");
+            assert_eq!(w["max_completion_tokens"], 1024, "{m}");
+        }
+    }
+
+    #[test]
+    fn text_only_user_content_stays_a_string() {
+        let mut req = LlmRequest::default();
+        req.contents.push(Content::user_text("hi"));
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o")).unwrap();
+        assert_eq!(w["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn inline_image_becomes_image_url_data_uri() {
+        use crate::genai_types::part::InlineData;
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: crate::genai_types::Role::User,
+            parts: vec![
+                Part::Text("what is this?".into()),
+                Part::InlineData(InlineData::from_bytes("image/png", b"px")),
+            ],
+        });
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o")).unwrap();
+        let parts = w["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(
+            parts[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+    }
+
+    #[test]
+    fn https_image_file_becomes_image_url() {
+        use crate::genai_types::part::FileData;
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: crate::genai_types::Role::User,
+            parts: vec![Part::FileData(FileData {
+                mime_type: "image/jpeg".into(),
+                file_uri: "https://example.com/cat.jpg".into(),
+                display_name: None,
+            })],
+        });
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o")).unwrap();
+        assert_eq!(
+            w["messages"][0]["content"][0]["image_url"]["url"],
+            "https://example.com/cat.jpg"
+        );
     }
 
     #[test]

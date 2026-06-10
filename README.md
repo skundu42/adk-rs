@@ -10,7 +10,7 @@ An open-source, code-first Rust framework for building, evaluating, and deployin
 
 ## Highlights
 
-- **Three providers, one trait** — Gemini, Anthropic Claude, and any OpenAI-compatible endpoint (Azure, Ollama, Groq) behind `Arc<dyn Model>`, with automatic retry/backoff built in.
+- **Three providers, one trait** — Gemini, Anthropic Claude, and any OpenAI-compatible endpoint (Azure, Ollama, Groq) behind `Arc<dyn Model>`, with native SSE streaming, image input, automatic retry/backoff, and prompt caching on every provider.
 - **Composable agents** — `LlmAgent`, `SequentialAgent`, `ParallelAgent`, and `LoopAgent` nest through one `BaseAgent` trait, driven by a unified event stream.
 - **Ergonomic tools** — `#[tool]` on any async function derives the schema and wiring; or mount tools from any **MCP** server or **OpenAPI 3.x** spec.
 - **Production runtime** — structured output, human-in-the-loop tool confirmation, pause/cancel/resume, context caching, event compaction, and semantic memory.
@@ -23,7 +23,7 @@ Default features are empty — opt in to what you need:
 
 ```toml
 [dependencies]
-adk-rs = { version = "0.4", features = ["gemini", "macros"] }
+adk-rs = { version = "0.5", features = ["gemini", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
 ```
@@ -124,6 +124,8 @@ cargo run --example gemini_chat --features gemini
 cargo run --example weather_agent --features "gemini,macros"
 cargo run --example three_providers --features "gemini,anthropic,openai"
 cargo run --example code_agent --features "code-exec,testing"
+# live API wire-compatibility smoke test (needs real keys):
+cargo run --example compat_check --features "anthropic,openai"
 ```
 
 The documentation site itself lives under [`docs/`](docs/) (`cd docs && npm install && npm run dev`); it is excluded from the published crate.

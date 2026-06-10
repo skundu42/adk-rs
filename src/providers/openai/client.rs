@@ -146,11 +146,33 @@ impl Model for OpenAi {
     }
 
     async fn stream_generate_content(&self, req: LlmRequest) -> Result<LlmResponseStream> {
-        // v0.1 fallback: single-shot then yield once. Real SSE accumulation
-        // (deltas, tool-call arg streaming) lands in a follow-up.
-        let r = self.generate_content(req).await?;
-        use futures::stream;
-        Ok(Box::pin(stream::once(async move { Ok::<_, Error>(r) })))
+        if self.cfg.api_key.is_empty() {
+            return Err(Error::Provider(ProviderError::Auth(
+                "OPENAI_API_KEY is empty".into(),
+            )));
+        }
+        let mut wire = to_wire(&req, &self.model_name);
+        wire.stream = true;
+        wire.stream_options = Some(serde_json::json!({ "include_usage": true }));
+        let body = serde_json::to_vec(&wire)?;
+        let resp = send_with_retry(&self.cfg.retry, || {
+            let mut rb = self
+                .http
+                .post(self.endpoint())
+                .header("authorization", format!("Bearer {}", self.cfg.api_key))
+                .header("content-type", "application/json");
+            if let Some(org) = &self.cfg.organization {
+                rb = rb.header("openai-organization", org);
+            }
+            rb.body(body.clone()).send()
+        })
+        .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_else(|_| "<no body>".into());
+            return Err(Error::Provider(ProviderError::Http { status, body }));
+        }
+        Ok(crate::providers::openai::stream::from_sse(resp))
     }
 }
 
@@ -207,5 +229,66 @@ mod tests {
         };
         let r = o.generate_content(req).await.unwrap();
         assert_eq!(r.content.unwrap().text_concat(), "yo");
+    }
+
+    #[tokio::test]
+    async fn streaming_decodes_deltas_tool_calls_and_usage() {
+        use futures::TryStreamExt;
+        use wiremock::matchers::body_partial_json;
+        let sse = concat!(
+            "data: {\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"He\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"y\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"x\\\":1}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_partial_json(json!({
+                "stream": true,
+                "stream_options": {"include_usage": true}
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+        let o = OpenAi::new(
+            "gpt-4o-mini",
+            OpenAiConfig {
+                base_url: server.uri(),
+                api_key: "k".into(),
+                ..OpenAiConfig::default()
+            },
+        )
+        .unwrap();
+        let stream = o
+            .stream_generate_content(LlmRequest {
+                contents: vec![crate::genai_types::Content::user_text("hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.try_collect().await.unwrap();
+
+        // Two text deltas + one final chunk with the tool call and usage.
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].content.as_ref().unwrap().text_concat(), "He");
+        assert_eq!(chunks[1].content.as_ref().unwrap().text_concat(), "y");
+        let last = &chunks[2];
+        let calls = last.function_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("call-1"));
+        assert_eq!(calls[0].args["x"], 1);
+        assert_eq!(
+            last.finish_reason,
+            Some(crate::genai_types::FinishReason::Stop)
+        );
+        assert_eq!(last.usage_metadata.unwrap().total_token_count, Some(7));
     }
 }

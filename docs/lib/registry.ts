@@ -183,4 +183,4 @@ export function prevNext(slug: string): { prev?: DocPage; next?: DocPage } {
 }
 
 export const REPO_URL = 'https://github.com/skundu42/adk-rs';
-export const CRATE_VERSION = '0.4.0';
+export const CRATE_VERSION = '0.5.0';

@@ -31,7 +31,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.4", features = ["gemini", "anthropic", "openai"] }`,
+adk-rs = { version = "0.5", features = ["gemini", "anthropic", "openai"] }`,
     },
     { kind: 'h2', text: 'Retries' },
     {
@@ -80,18 +80,33 @@ let model = Gemini::new("gemini-2.5-flash", GeminiConfig {
     { kind: 'h2', text: 'Anthropic' },
     {
       kind: 'p',
-      text: 'The Anthropic client targets the Messages API (`POST {base_url}/v1/messages`) with `x-api-key` and `anthropic-version` headers. `Anthropic::from_env(model_name)` reads `$ANTHROPIC_API_KEY`; `AnthropicConfig` exposes `base_url` (default `https://api.anthropic.com`), `anthropic_version` (default `2023-06-01`), `api_key`, and `timeout`.',
+      text: 'The Anthropic client targets the Messages API (`POST {base_url}/v1/messages`) with `x-api-key` and `anthropic-version` headers. `Anthropic::from_env(model_name)` reads `$ANTHROPIC_API_KEY`; `AnthropicConfig` exposes `base_url` (default `https://api.anthropic.com`), `anthropic_version` (default `2023-06-01`), `api_key`, `timeout`, and `retry`.',
     },
     {
-      kind: 'callout',
-      tone: 'note',
-      title: 'Streaming fallback',
-      text: 'In the current release `Anthropic::stream_generate_content` performs a single-shot `generate_content` call and yields the result as a one-element stream — true SSE event accumulation is planned. The same applies to the OpenAI client. Gemini is the only provider with native chunked streaming today.',
+      kind: 'list',
+      items: [
+        '**Streaming** — native SSE: text and thinking deltas are emitted as partial chunks the moment they arrive, tool-call arguments accumulate across `input_json_delta` fragments and surface as one complete `FunctionCall`, and the final chunk carries the stop reason and usage.',
+        '**Multimodal input** — `Part::InlineData` images become base64 `image` blocks, inline PDFs become `document` blocks, and `https://` `Part::FileData` references become URL sources. Unsupported parts are dropped with a warning, never silently.',
+        '**Prompt caching** — a [`ContextCacheConfig`](/docs/context-caching) on the request becomes a `cache_control` breakpoint on the system block (or the last tool when there is no system instruction), so Anthropic caches the stable prefix server-side. Cache activity surfaces on `event.response.cache_metadata` and `usage_metadata.cached_content_token_count`.',
+      ],
     },
     { kind: 'h2', text: 'OpenAI (and Azure, Ollama, Groq)' },
     {
       kind: 'p',
       text: 'The `OpenAi` client speaks the `chat/completions` protocol, which makes it the bridge to every OpenAI-compatible endpoint. `OpenAi::from_env(model_name)` reads `$OPENAI_API_KEY` and honours `$OPENAI_BASE_URL` (default `https://api.openai.com/v1`). `OpenAiConfig` adds `api_version` (appended as Azure’s `?api-version=` query parameter) and `organization` (sent as the `OpenAI-Organization` header). The key travels as `Authorization: Bearer ...`.',
+    },
+    {
+      kind: 'list',
+      items: [
+        '**Streaming** — native SSE with `stream_options: {include_usage: true}`: content deltas stream as partial chunks; fragment-wise tool calls are reassembled by index and emitted complete in the final chunk alongside the finish reason and usage.',
+        '**Multimodal input** — text-only user messages stay plain strings; messages with images switch to the content-parts form, mapping inline images to `data:` URI `image_url` parts and `https://` image references to plain `image_url` parts.',
+        '**Reasoning models** — `max_output_tokens` is sent as `max_completion_tokens` for the o-series / gpt-5 family (which reject the deprecated `max_tokens` with a 400) and as `max_tokens` for everything else, keeping older OpenAI-compatible servers working.',
+      ],
+    },
+    {
+      kind: 'callout',
+      tone: 'tip',
+      text: 'To verify wire compatibility against the live APIs with your own keys, run `cargo run --example compat_check --features "anthropic,openai"` — it exercises generation, streaming, tool calling, structured output, image input, and prompt-cache breakpoints, printing PASS/FAIL per check.',
     },
     {
       kind: 'code',

@@ -113,7 +113,7 @@ cognitive_complexity = "allow"
 
 [package]
 name = "adk-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -137,7 +137,7 @@ default = []
 # Providers
 gemini = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
 anthropic = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
-openai = ["dep:reqwest"]
+openai = ["dep:reqwest", "dep:eventsource-stream"]
 # Gemini Live API: bidirectional WebSocket streaming (text + audio).
 live = ["gemini", "dep:tokio-tungstenite"]
 # Storage backends
@@ -294,3 +294,7 @@ incremental = true
 
 [profile.test]
 opt-level = 1
+
+[[example]]
+name = "compat_check"
+required-features = ["anthropic", "openai"]

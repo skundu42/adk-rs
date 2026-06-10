@@ -9,7 +9,7 @@ export const page: DocPage = {
   blocks: [
     {
       kind: 'lede',
-      text: 'Agents with large instructions or tool sets resend the same prefix on every LLM call. With a `ContextCacheConfig` attached, cache-capable providers (today: Gemini) create an explicit server-side cache for that stable prefix — system instruction plus tool declarations — and reference it on subsequent calls instead of resending it, cutting both token cost and latency.',
+      text: 'Agents with large instructions or tool sets resend the same prefix on every LLM call. With a `ContextCacheConfig` attached, cache-capable providers reuse that stable prefix — system instruction plus tool declarations — server-side instead of reprocessing it, cutting both token cost and latency. Gemini creates an explicit `cachedContents` entry; Anthropic gets a `cache_control` breakpoint on the same prefix; OpenAI caches automatically with nothing to configure.',
     },
     { kind: 'h2', text: 'ContextCacheConfig' },
     {
@@ -100,10 +100,15 @@ let runner = Runner::builder()
         'On a creation failure, disables caching for that prefix for one TTL and logs a warning — caching is an optimization, never a source of run failures.',
       ],
     },
+    { kind: 'h2', text: 'What the Anthropic provider does' },
+    {
+      kind: 'p',
+      text: 'Anthropic\'s prompt cache is server-managed, so there is no entry to create: the same `ContextCacheConfig` instead becomes a `cache_control` breakpoint on the stable prefix. The breakpoint lands on the system block (tools render before system on Anthropic\'s side, so one marker caches both); with no system instruction it lands on the last tool declaration. A `ttl_seconds` of 3600 or more selects the 1-hour cache tier, anything less the default 5-minute tier. `cache_intervals` and `min_tokens` are Gemini-specific and ignored — Anthropic enforces its own server-side minimums. Cache activity is reported per response via `cache_metadata` (`cache_hit`) and `usage_metadata.cached_content_token_count`. Pair with [`static_instruction`](/docs/llm-agent) exactly as for Gemini: the breakpoint only pays off when the prefix is byte-identical across turns.',
+    },
     {
       kind: 'callout',
       tone: 'note',
-      text: 'Only the Gemini provider implements explicit context caching today. Other providers ignore `cache_config`; the configuration is harmless to leave in place when you swap models.',
+      text: 'Gemini and Anthropic both honour `cache_config` (explicit `cachedContents` entries and `cache_control` breakpoints respectively). The OpenAI provider ignores it — OpenAI\'s prompt caching is automatic server-side, with nothing to configure. The configuration is harmless to leave in place when you swap models.',
     },
     { kind: 'h2', text: 'Observability: CacheMetadata' },
     {

@@ -126,10 +126,30 @@ impl Model for Anthropic {
     }
 
     async fn stream_generate_content(&self, req: LlmRequest) -> Result<LlmResponseStream> {
-        // For v0.1, fall back to single-shot then yield once. Real SSE event
-        // accumulation lands in a follow-up.
-        let r = self.generate_content(req).await?;
-        Ok(crate::providers::anthropic::stream_one(r))
+        if self.cfg.api_key.is_empty() {
+            return Err(Error::Provider(ProviderError::Auth(
+                "ANTHROPIC_API_KEY is empty".into(),
+            )));
+        }
+        let mut wire = to_wire(&req, &self.model_name);
+        wire.stream = true;
+        let body = serde_json::to_vec(&wire)?;
+        let resp = send_with_retry(&self.cfg.retry, || {
+            self.http
+                .post(self.endpoint())
+                .header("x-api-key", &self.cfg.api_key)
+                .header("anthropic-version", &self.cfg.anthropic_version)
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+        })
+        .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_else(|_| "<no body>".into());
+            return Err(Error::Provider(ProviderError::Http { status, body }));
+        }
+        Ok(crate::providers::anthropic::stream::from_sse(resp))
     }
 }
 
@@ -184,5 +204,78 @@ mod tests {
         };
         let r = a.generate_content(req).await.unwrap();
         assert_eq!(r.content.unwrap().text_concat(), "hi");
+    }
+
+    #[tokio::test]
+    async fn streaming_decodes_text_tool_calls_and_usage() {
+        use futures::TryStreamExt;
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu-1\",\"name\":\"f\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":1}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+        let a = Anthropic::new(
+            "claude-sonnet-4-6",
+            AnthropicConfig {
+                base_url: server.uri(),
+                api_key: "k".into(),
+                ..AnthropicConfig::default()
+            },
+        )
+        .unwrap();
+        let stream = a
+            .stream_generate_content(LlmRequest {
+                contents: vec![crate::genai_types::Content::user_text("hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.try_collect().await.unwrap();
+
+        // Two text deltas, one complete tool call, one final chunk.
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].content.as_ref().unwrap().text_concat(), "Hel");
+        assert_eq!(chunks[1].content.as_ref().unwrap().text_concat(), "lo");
+        let calls = chunks[2].function_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("tu-1"));
+        assert_eq!(calls[0].args["x"], 1);
+        let last = &chunks[3];
+        assert_eq!(
+            last.finish_reason,
+            Some(crate::genai_types::FinishReason::Stop)
+        );
+        let usage = last.usage_metadata.unwrap();
+        assert_eq!(usage.prompt_token_count, Some(7));
+        assert_eq!(usage.candidates_token_count, Some(3));
     }
 }

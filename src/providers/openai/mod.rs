@@ -4,6 +4,7 @@
 mod client;
 mod convert;
 mod embedder;
+mod stream;
 
 pub use client::{OpenAi, OpenAiConfig};
 pub use embedder::OpenAiEmbedder;
