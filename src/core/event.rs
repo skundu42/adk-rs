@@ -34,6 +34,12 @@ pub struct EventActions {
     /// Compaction info, if this event compacted earlier events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<EventCompaction>,
+    /// Tool confirmations requested by this event, keyed by function-call
+    /// id. The caller answers with `adk_request_confirmation` function
+    /// responses (see [`crate::core::tool_confirmation`]).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub requested_tool_confirmations:
+        IndexMap<String, crate::core::tool_confirmation::ToolConfirmation>,
     /// Free-form agent-checkpoint state for resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<serde_json::Value>,
@@ -197,6 +203,54 @@ impl Event {
     }
 }
 
+/// Assemble LLM conversation history from session events, honouring
+/// compaction: events covered by a [`EventCompaction`] range are replaced by
+/// the compaction's summary content (emitted once, in place of the first
+/// covered event). When overlapping compactions cover the same event, the
+/// newest one wins.
+#[must_use]
+pub fn history_with_compaction(events: &[Event]) -> Vec<Content> {
+    let compactions: Vec<(usize, &EventCompaction)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.actions.compaction.as_ref().map(|c| (i, c)))
+        .collect();
+    if compactions.is_empty() {
+        return events
+            .iter()
+            .filter_map(|e| e.response.content.clone())
+            .collect();
+    }
+
+    let mut emitted = vec![false; compactions.len()];
+    let mut out = Vec::new();
+    for (idx, e) in events.iter().enumerate() {
+        if e.actions.compaction.is_some() {
+            continue;
+        }
+        // Newest compaction (last in log order) covering this event wins.
+        // (Intentional grouping: position check + timestamp range check.)
+        #[allow(clippy::suspicious_operation_groupings)]
+        let cover = compactions.iter().enumerate().rev().find(|(_, (ci, c))| {
+            idx < *ci && e.timestamp >= c.start_timestamp && e.timestamp <= c.end_timestamp
+        });
+        match cover {
+            Some((slot, (_, c))) => {
+                if !emitted[slot] {
+                    emitted[slot] = true;
+                    out.push(c.compacted_content.clone());
+                }
+            }
+            None => {
+                if let Some(c) = e.response.content.clone() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +275,66 @@ mod tests {
         let e = Event::new("agent", resp);
         assert!(!e.is_final_response());
         assert_eq!(e.function_calls().len(), 1);
+    }
+
+    #[test]
+    fn history_with_compaction_replaces_covered_events() {
+        let mut events = Vec::new();
+        for (i, text) in ["one", "two", "three"].iter().enumerate() {
+            let mut e = Event::model_text("a", *text);
+            e.timestamp = i as f64 + 1.0;
+            events.push(e);
+        }
+        // Compaction covering "one" and "two".
+        let mut comp = Event::new("a", LlmResponse::default());
+        comp.timestamp = 3.5;
+        comp.actions.compaction = Some(EventCompaction {
+            start_timestamp: 1.0,
+            end_timestamp: 2.0,
+            compacted_content: Content::user_text("[summary of one+two]"),
+        });
+        events.push(comp);
+        let mut after = Event::model_text("a", "four");
+        after.timestamp = 4.0;
+        events.push(after);
+
+        let history = history_with_compaction(&events);
+        let texts: Vec<String> = history.iter().map(|c| c.text_concat()).collect();
+        assert_eq!(texts, vec!["[summary of one+two]", "three", "four"]);
+    }
+
+    #[test]
+    fn overlapping_compactions_prefer_newest() {
+        let mut events = Vec::new();
+        for i in 0..4 {
+            let mut e = Event::model_text("a", format!("m{i}"));
+            e.timestamp = i as f64 + 1.0;
+            events.push(e);
+        }
+        let mut c1 = Event::new("a", LlmResponse::default());
+        c1.timestamp = 4.2;
+        c1.actions.compaction = Some(EventCompaction {
+            start_timestamp: 1.0,
+            end_timestamp: 2.0,
+            compacted_content: Content::user_text("[old summary]"),
+        });
+        events.push(c1);
+        // Newer compaction overlaps event at t=2.0 and extends to t=4.0.
+        let mut c2 = Event::new("a", LlmResponse::default());
+        c2.timestamp = 4.5;
+        c2.actions.compaction = Some(EventCompaction {
+            start_timestamp: 2.0,
+            end_timestamp: 4.0,
+            compacted_content: Content::user_text("[new summary]"),
+        });
+        events.push(c2);
+
+        let texts: Vec<String> = history_with_compaction(&events)
+            .iter()
+            .map(|c| c.text_concat())
+            .collect();
+        // m0 is only covered by the old compaction; m1..m3 by the new one.
+        assert_eq!(texts, vec!["[old summary]", "[new summary]"]);
     }
 
     #[test]

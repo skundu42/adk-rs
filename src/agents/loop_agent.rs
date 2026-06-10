@@ -75,6 +75,11 @@ impl BaseAgent for LoopAgent {
                             break 'outer;
                         }
                     }
+                    // Suspend the loop if a sub-agent paused the invocation
+                    // (HITL confirmation, auth consent, long-running tool).
+                    if crate::agents::sequential_agent::invocation_paused(&ctx) {
+                        break 'outer;
+                    }
                 }
             }
         };

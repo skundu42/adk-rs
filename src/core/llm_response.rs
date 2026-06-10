@@ -41,6 +41,10 @@ pub struct LlmResponse {
     /// Usage metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_metadata: Option<UsageMetadata>,
+    /// Context-cache usage for this call (set by cache-capable providers
+    /// when a [`crate::core::ContextCacheConfig`] is active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_metadata: Option<crate::core::cache::CacheMetadata>,
 }
 
 impl LlmResponse {

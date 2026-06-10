@@ -19,5 +19,5 @@ pub use client::{McpClient, McpToolDescriptor};
 pub use http::{HttpTransport, McpHttpParams};
 pub use stdio::{McpStdioParams, StdioTransport};
 pub use tool::McpTool;
-pub use toolset::McpToolset;
+pub use toolset::{ConfirmationPolicy, McpToolset};
 pub use transport::Transport;

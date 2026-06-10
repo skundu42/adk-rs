@@ -29,6 +29,8 @@ pub struct FunctionTool {
     description: String,
     parameters: Option<Schema>,
     long_running: bool,
+    require_confirmation: bool,
+    confirmation_hint: Option<String>,
     f: FunctionToolFn,
 }
 
@@ -55,6 +57,8 @@ impl FunctionTool {
             description: description.into(),
             parameters,
             long_running: false,
+            require_confirmation: false,
+            confirmation_hint: None,
             f,
         }
     }
@@ -63,6 +67,22 @@ impl FunctionTool {
     #[must_use]
     pub fn with_long_running(mut self, yes: bool) -> Self {
         self.long_running = yes;
+        self
+    }
+
+    /// Require explicit user confirmation before each call (human-in-the-
+    /// loop). The agent pauses with an `adk_request_confirmation` request
+    /// instead of dispatching; see [`crate::core::tool_confirmation`].
+    #[must_use]
+    pub fn require_confirmation(mut self, yes: bool) -> Self {
+        self.require_confirmation = yes;
+        self
+    }
+
+    /// Custom hint shown to the user when confirmation is requested.
+    #[must_use]
+    pub fn with_confirmation_hint(mut self, hint: impl Into<String>) -> Self {
+        self.confirmation_hint = Some(hint.into());
         self
     }
 
@@ -99,6 +119,16 @@ impl DynTool for FunctionTool {
 
     fn is_long_running(&self) -> bool {
         self.long_running
+    }
+
+    fn requires_confirmation(&self, _args: &Value) -> bool {
+        self.require_confirmation
+    }
+
+    fn confirmation_hint(&self, _args: &Value) -> String {
+        self.confirmation_hint
+            .clone()
+            .unwrap_or_else(|| format!("Approve execution of tool `{}`?", self.name))
     }
 
     fn declaration(&self) -> Option<FunctionDeclaration> {

@@ -7,10 +7,54 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::core::{EventStream, InvocationContext};
+use crate::core::{Event, EventStream, InvocationContext, LlmResponse};
 use crate::error::{Error, Result};
 
 use crate::agents::base::BaseAgent;
+
+/// True when [`crate::core::RunConfig::resumability`] enables resume.
+pub(crate) fn is_resumable(ctx: &InvocationContext) -> bool {
+    ctx.run_config
+        .resumability
+        .map(|r| r.is_resumable)
+        .unwrap_or(false)
+}
+
+/// True when a descendant agent paused the invocation (long-running tool,
+/// confirmation, or auth consent pending).
+pub(crate) fn invocation_paused(ctx: &InvocationContext) -> bool {
+    ctx.attributes
+        .lock()
+        .get("invocation.paused")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Latest checkpoint recorded by `author` within this invocation: how many
+/// sub-agents have completed.
+pub(crate) fn completed_sub_agents(ctx: &InvocationContext, author: &str) -> usize {
+    let sess = ctx.session.lock();
+    sess.events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.invocation_id == ctx.invocation_id
+                && e.author == author
+                && e.actions.agent_state.is_some()
+        })
+        .and_then(|e| e.actions.agent_state.as_ref())
+        .and_then(|s| s.get("completed_sub_agents"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
+/// Build a checkpoint event recording that `n` sub-agents completed.
+pub(crate) fn checkpoint_event(author: &str, invocation_id: &str, n: usize) -> Event {
+    let mut e = Event::new(author, LlmResponse::default());
+    e.invocation_id = invocation_id.to_string();
+    e.actions.agent_state = Some(serde_json::json!({ "completed_sub_agents": n }));
+    e
+}
 
 /// Run sub-agents in declared order.
 #[derive(Debug)]
@@ -54,7 +98,15 @@ impl BaseAgent for SequentialAgent {
     async fn run(self: Arc<Self>, ctx: Arc<InvocationContext>) -> Result<EventStream<'static>> {
         let me = self.clone();
         let stream = try_stream! {
-            for sub in &me.sub_agents {
+            let resumable = is_resumable(&ctx);
+            // On an in-place resume (same invocation id), skip sub-agents
+            // that completed before the pause.
+            let start_index = if resumable {
+                completed_sub_agents(&ctx, &me.name)
+            } else {
+                0
+            };
+            for (i, sub) in me.sub_agents.iter().enumerate().skip(start_index) {
                 if ctx.is_cancelled() {
                     return;
                 }
@@ -67,6 +119,15 @@ impl BaseAgent for SequentialAgent {
                     if escalate {
                         return;
                     }
+                }
+                // A paused sub-agent (HITL confirmation, auth consent,
+                // long-running tool) suspends the whole pipeline; resume
+                // re-enters at this index thanks to the checkpoint below.
+                if invocation_paused(&ctx) {
+                    return;
+                }
+                if resumable && i + 1 < me.sub_agents.len() {
+                    yield checkpoint_event(&me.name, &ctx.invocation_id, i + 1);
                 }
             }
         };

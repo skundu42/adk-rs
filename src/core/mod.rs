@@ -6,6 +6,7 @@
 //! `Model`). Implementations live in `adk-services-*` and `adk-providers-*`.
 
 pub mod artifact;
+pub mod cache;
 pub mod callback;
 pub mod cancel;
 pub mod context;
@@ -19,6 +20,7 @@ pub mod services;
 pub mod session;
 pub mod state;
 pub mod stream;
+pub mod tool_confirmation;
 pub mod tool_object;
 
 #[cfg(any(test, feature = "testing"))]
@@ -34,14 +36,15 @@ pub use callback::{
     BeforeModelCallback, BeforeToolCallback, CallbackContext, OnModelErrorCallback,
     OnToolErrorCallback, ReadonlyContext,
 };
+pub use cache::{CacheMetadata, ContextCacheConfig};
 pub use cancel::CancellationToken;
 pub use context::{InvocationContext, InvocationOrigin, ToolContext};
-pub use event::{Event, EventActions, EventCompaction};
+pub use event::{Event, EventActions, EventCompaction, history_with_compaction};
 pub use llm_request::LlmRequest;
 pub use llm_response::LlmResponse;
 pub use memory::{MemoryEntry, SearchMemoryResponse};
 pub use model::{Model, ModelRegistry};
-pub use run_config::{RunConfig, StreamingMode};
+pub use run_config::{ResumabilityConfig, RunConfig, StreamingMode};
 pub use services::{
     ArtifactService, CredentialService, GetSessionConfig, ListSessionsResponse, MemoryService,
     SessionService, SessionsMeta, apply_event_to_session,
@@ -49,4 +52,8 @@ pub use services::{
 pub use session::{Session, SessionId, SessionMeta};
 pub use state::{State, StateDelta, StateScope};
 pub use stream::{EventStream, LlmResponseStream};
+pub use tool_confirmation::{
+    ConfirmationPreprocessor, ConfirmationRequest, REQUEST_CONFIRMATION_FUNCTION_NAME,
+    ToolConfirmation,
+};
 pub use tool_object::DynTool;

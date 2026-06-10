@@ -19,6 +19,7 @@ pub struct McpTool {
     description: String,
     schema: Option<Schema>,
     client: Arc<McpClient>,
+    require_confirmation: bool,
 }
 
 impl std::fmt::Debug for McpTool {
@@ -47,7 +48,15 @@ impl McpTool {
             description: d.description,
             schema,
             client,
+            require_confirmation: false,
         }
+    }
+
+    /// Require explicit user confirmation before each call.
+    #[must_use]
+    pub fn with_require_confirmation(mut self, yes: bool) -> Self {
+        self.require_confirmation = yes;
+        self
     }
 }
 
@@ -58,6 +67,9 @@ impl DynTool for McpTool {
     }
     fn description(&self) -> &str {
         &self.description
+    }
+    fn requires_confirmation(&self, _args: &Value) -> bool {
+        self.require_confirmation
     }
     fn declaration(&self) -> Option<FunctionDeclaration> {
         Some(

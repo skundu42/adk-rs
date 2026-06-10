@@ -95,6 +95,10 @@ pub enum Command {
         /// default to prevent accidentally exposing the agent control plane.
         #[arg(long)]
         dangerously_allow_unauthenticated_remote: bool,
+        /// Origins allowed via CORS (repeatable). Needed when the adk-web
+        /// dev UI runs on a different origin, e.g. `http://localhost:4200`.
+        #[arg(long = "allow-origins")]
+        allow_origins: Vec<String>,
     },
     /// Run an eval set against a registered agent.
     Eval {
@@ -185,6 +189,7 @@ impl App {
                 bind,
                 auth_token,
                 dangerously_allow_unauthenticated_remote,
+                allow_origins,
             } => {
                 let mut runners = HashMap::new();
                 for (name, agent) in &self.agents {
@@ -194,7 +199,8 @@ impl App {
                 let state = match auth_token {
                     Some(t) => crate::server::AppState::with_bearer_token(runners, t),
                     None => crate::server::AppState::unauthenticated(runners),
-                };
+                }
+                .with_allow_origins(allow_origins);
                 info!("starting dev server on http://{bind}");
                 crate::server::serve_with(
                     bind,

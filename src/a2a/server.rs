@@ -251,6 +251,36 @@ async fn require_bearer(
     }
 }
 
+/// True if `ev` pauses the invocation awaiting user input: a long-running
+/// tool handle, a tool-confirmation request, or an auth-consent request.
+fn event_pauses_invocation(ev: &Event) -> bool {
+    ev.long_running_tool_ids
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+}
+
+/// Terminal status for a drained run: `input-required` when the agent
+/// paused awaiting user input (HITL confirmation, credential consent, or a
+/// long-running tool result), `completed` otherwise.
+fn final_task_status(paused: bool) -> TaskStatus {
+    if paused {
+        TaskStatus {
+            state: TaskState::InputRequired,
+            message: Some(Message::agent_text(
+                "awaiting user input: tool confirmation, credential consent, or a \
+                 long-running tool result",
+            )),
+            timestamp: Some(rfc3339_now()),
+        }
+    } else {
+        TaskStatus {
+            state: TaskState::Completed,
+            message: None,
+            timestamp: Some(rfc3339_now()),
+        }
+    }
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -342,9 +372,11 @@ async fn handle_message_send(
     // Drain the event stream synchronously, accumulating artifacts.
     let agg = Aggregator::new(task_id.clone(), context_id.clone());
     let agg = Arc::new(Mutex::new(agg));
+    let mut paused = false;
     while let Some(ev) = events.next().await {
         match ev {
             Ok(ev) => {
+                paused = paused || event_pauses_invocation(&ev);
                 let mut a = agg.lock();
                 a.absorb(&ev);
             }
@@ -376,15 +408,7 @@ async fn handle_message_send(
     }
     let _ = state
         .tasks
-        .update_status(
-            &task_id,
-            TaskStatus {
-                state: TaskState::Completed,
-                message: None,
-                timestamp: Some(rfc3339_now()),
-            },
-            true,
-        )
+        .update_status(&task_id, final_task_status(paused), true)
         .await;
     match state.tasks.get_task(&task_id, None).await {
         Ok(Some(final_task)) => Json(A2aResponse::ok(
@@ -462,9 +486,13 @@ fn handle_message_stream(
         let runner_task = tokio::spawn(async move {
             let mut agg = Aggregator::new(task_id_for_run.clone(), context_id_for_run);
             let mut last_err: Option<String> = None;
+            let mut paused = false;
             while let Some(ev) = events.next().await {
                 match ev {
-                    Ok(ev) => agg.absorb(&ev),
+                    Ok(ev) => {
+                        paused = paused || event_pauses_invocation(&ev);
+                        agg.absorb(&ev);
+                    }
                     Err(e) => {
                         last_err = Some(e.to_string());
                         break;
@@ -488,15 +516,7 @@ fn handle_message_stream(
                     .await;
             } else {
                 let _ = svc.tasks
-                    .update_status(
-                        &task_id_for_run,
-                        TaskStatus {
-                            state: TaskState::Completed,
-                            message: None,
-                            timestamp: Some(rfc3339_now()),
-                        },
-                        true,
-                    )
+                    .update_status(&task_id_for_run, final_task_status(paused), true)
                     .await;
             }
         });

@@ -44,6 +44,21 @@ pub trait DynTool: Send + Sync + std::fmt::Debug + 'static {
         None
     }
 
+    /// Whether this call requires explicit user confirmation before it can
+    /// run (human-in-the-loop). When `true`, the agent pauses with an
+    /// `adk_request_confirmation` request instead of dispatching the tool;
+    /// see [`crate::core::tool_confirmation`]. `args` lets implementations
+    /// decide per call (e.g. only confirm destructive operations).
+    fn requires_confirmation(&self, _args: &Value) -> bool {
+        false
+    }
+
+    /// Human-readable hint shown to the user when confirmation is
+    /// requested. Defaults to a generic message naming the tool.
+    fn confirmation_hint(&self, _args: &Value) -> String {
+        format!("Approve execution of tool `{}`?", self.name())
+    }
+
     /// JSON-Schema declaration of the tool's parameters; `None` for tools
     /// (e.g. Gemini built-ins) that should not be advertised to the model.
     fn declaration(&self) -> Option<FunctionDeclaration>;

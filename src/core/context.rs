@@ -131,6 +131,10 @@ pub struct ToolContext {
     /// declared an `auth_config()`. Authenticated tools should read their
     /// access token / API key from here rather than from the args.
     pub auth_credential: Option<crate::auth::AuthCredential>,
+    /// The user's confirmation decision, set before `run` when the tool
+    /// requires confirmation and the user approved it (carries any payload
+    /// the user attached to the approval).
+    pub tool_confirmation: Option<crate::core::tool_confirmation::ToolConfirmation>,
 }
 
 impl ToolContext {
@@ -146,6 +150,7 @@ impl ToolContext {
             escalate: false,
             long_running: false,
             auth_credential: None,
+            tool_confirmation: None,
         }
     }
 
