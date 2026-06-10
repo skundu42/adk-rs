@@ -31,14 +31,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/docs/introduction">Docs</Link>
             <Link href="/docs/examples/gemini-chat">Examples</Link>
             <Link href="/docs/guides/multi-agent-pipeline">Guides</Link>
-            <a className="gh-link" href={REPO_URL} target="_blank" rel="noreferrer">
-              GitHub ↗
+            <a className="star-btn" href={REPO_URL} target="_blank" rel="noreferrer">
+              <span className="star-glyph">★</span> Star on GitHub
             </a>
           </nav>
         </header>
         {children}
         <footer className="site-footer">
           <span>adk-rs · Apache-2.0 · Rust 1.85+ / edition 2024</span>
+          <span>
+            Built by{' '}
+            <a href="https://sandipank.dev" target="_blank" rel="noreferrer">
+              Sandipan Kundu
+            </a>
+          </span>
           <span>
             <a href="https://crates.io/crates/adk-rs" target="_blank" rel="noreferrer">
               crates.io/crates/adk-rs
