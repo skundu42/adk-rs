@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::{HeaderValue, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use tracing::{info, warn};
 
 use crate::runner::Runner;
@@ -26,6 +26,10 @@ pub struct AppState {
     /// transport-level [`serve`] guard still refuses non-loopback binds in
     /// that case).
     pub auth_token: Option<Arc<String>>,
+    /// Origins allowed for CORS (e.g. the adk-web dev UI's origin,
+    /// `http://localhost:4200`). Empty (default) → no CORS headers are
+    /// emitted and cross-origin browser clients are refused by the browser.
+    pub allow_origins: Arc<Vec<String>>,
 }
 
 impl AppState {
@@ -35,6 +39,7 @@ impl AppState {
         Self {
             runners,
             auth_token: None,
+            allow_origins: Arc::new(Vec::new()),
         }
     }
 
@@ -47,7 +52,16 @@ impl AppState {
         Self {
             runners,
             auth_token: Some(Arc::new(token.into())),
+            allow_origins: Arc::new(Vec::new()),
         }
+    }
+
+    /// Allow the given origins via CORS (needed when the adk-web dev UI is
+    /// served from a different origin than this server).
+    #[must_use]
+    pub fn with_allow_origins(mut self, origins: impl IntoIterator<Item = String>) -> Self {
+        self.allow_origins = Arc::new(origins.into_iter().collect());
+        self
     }
 }
 
@@ -60,21 +74,34 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-/// Build the axum router. When `state.auth_token` is `Some`, every route is
-/// wrapped in a bearer-token check.
+/// Build the axum router. The endpoint surface follows Python ADK's
+/// `adk api_server` wire contract (see [`crate::server::wire`]); the legacy
+/// `/list-agents` route is kept for existing adk-rs clients. When
+/// `state.auth_token` is `Some`, every route is wrapped in a bearer-token
+/// check.
 pub fn build_router(state: AppState) -> Router {
-    let inner = Router::new()
+    let mut inner = Router::new()
         .route("/list-agents", get(routes::list_agents))
-        .route("/run", post(routes::run))
-        .route("/run_sse", post(routes::run_sse))
-        .route(
-            "/apps/:app/users/:user/sessions",
-            get(routes::list_sessions).post(routes::create_session),
-        )
-        .route(
-            "/apps/:app/users/:user/sessions/:session",
-            get(routes::get_session).delete(routes::delete_session),
+        .merge(crate::server::adk_web::router());
+    if !state.allow_origins.is_empty() {
+        use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+        let origins: Vec<HeaderValue> = state
+            .allow_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        let allow_origin = if state.allow_origins.iter().any(|o| o == "*") {
+            AllowOrigin::any()
+        } else {
+            AllowOrigin::list(origins)
+        };
+        inner = inner.layer(
+            CorsLayer::new()
+                .allow_origin(allow_origin)
+                .allow_methods(Any)
+                .allow_headers(Any),
         );
+    }
     if state.auth_token.is_some() {
         let token_state = state.clone();
         inner
@@ -213,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn serve_refuses_non_loopback_without_auth_or_override() {
         let state = empty_state(None);
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let err = serve(addr, state).await.unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -224,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_allows_non_loopback_when_auth_set() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         validate_bind_policy(addr, true, &ServeOptions::default()).unwrap();
     }
 

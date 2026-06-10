@@ -446,7 +446,7 @@ impl SessionService for SqlSessionService {
         }
         // Re-run the apply+persist on the snapshot so the SQL INSERT/UPDATE
         // see consistent state.
-        let _ = self.append_event(&mut snapshot, event.clone()).await?;
+        self.append_event(&mut snapshot, event.clone()).await?;
         Ok(event)
     }
 }

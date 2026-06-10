@@ -67,6 +67,15 @@ pub struct Runner {
     credential_service: Option<Arc<dyn CredentialService>>,
     plugins: Arc<PluginManager>,
     auto_create_session: bool,
+    /// App-level context-cache config; copied into each invocation's
+    /// `RunConfig` unless the caller set one explicitly.
+    context_cache_config: Option<crate::core::ContextCacheConfig>,
+    /// When set, the runner compacts older session events after invocations
+    /// complete (see [`crate::runner::EventsCompactionConfig`]).
+    compaction: Option<crate::runner::EventsCompactionConfig>,
+    /// App-level resumability; copied into each invocation's `RunConfig`
+    /// unless the caller set one explicitly.
+    resumability: Option<crate::core::ResumabilityConfig>,
     /// In-flight invocations, keyed by `invocation_id`. Entries are added
     /// at the top of [`Self::start`] and removed when the corresponding
     /// event stream completes. [`Self::cancel`] flips an entry's token
@@ -104,6 +113,16 @@ impl Runner {
     /// Session service.
     pub fn session_service(&self) -> &Arc<dyn SessionService> {
         &self.session_service
+    }
+
+    /// Artifact service, if configured.
+    pub fn artifact_service(&self) -> Option<&Arc<dyn ArtifactService>> {
+        self.artifact_service.as_ref()
+    }
+
+    /// Memory service, if configured.
+    pub fn memory_service(&self) -> Option<&Arc<dyn MemoryService>> {
+        self.memory_service.as_ref()
     }
 
     /// Run a single turn against `user_text`. Returns a stream of events.
@@ -170,10 +189,54 @@ impl Runner {
         user_content: Content,
         run_config: RunConfig,
     ) -> Result<RunningInvocation> {
+        self.start_internal(user_id, session_id, Some(user_content), run_config, None)
+            .await
+    }
+
+    /// Resume a paused invocation **in place**: the run keeps
+    /// `invocation_id`, so (with resumability enabled — see
+    /// [`RunnerBuilder::resumable`]) workflow agents continue from their
+    /// recorded checkpoints instead of restarting. `new_content` typically
+    /// carries the `FunctionResponse` that unblocks the pause — a
+    /// long-running tool result, an `adk_request_confirmation` decision, or
+    /// an `adk_request_credential` consent.
+    pub async fn resume(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        invocation_id: &str,
+        new_content: Option<Content>,
+        run_config: RunConfig,
+    ) -> Result<RunningInvocation> {
+        self.start_internal(
+            user_id,
+            Some(session_id),
+            new_content,
+            run_config,
+            Some(invocation_id.to_string()),
+        )
+        .await
+    }
+
+    async fn start_internal(
+        &self,
+        user_id: &str,
+        session_id: Option<&str>,
+        user_content: Option<Content>,
+        run_config: RunConfig,
+        resume_invocation_id: Option<String>,
+    ) -> Result<RunningInvocation> {
+        let mut run_config = run_config;
+        if run_config.context_cache_config.is_none() {
+            run_config.context_cache_config = self.context_cache_config.clone();
+        }
+        if run_config.resumability.is_none() {
+            run_config.resumability = self.resumability;
+        }
         let session = self
             .load_or_create_session(user_id, session_id, None)
             .await?;
-        let invocation_id = InvocationContext::new_id();
+        let invocation_id = resume_invocation_id.unwrap_or_else(InvocationContext::new_id);
         let cancellation = CancellationToken::new();
         self.active
             .lock()
@@ -189,52 +252,68 @@ impl Runner {
             credential_service: self.credential_service.clone(),
             run_config,
             origin: InvocationOrigin::Api,
-            user_content: Some(user_content.clone()),
+            user_content: user_content.clone(),
             llm_call_count: Arc::new(Mutex::new(0)),
             cancellation: cancellation.clone(),
             attributes: Arc::new(Mutex::new(HashMap::new())),
         });
 
-        // Persist the user event before launching the agent.
-        let mut user_ev = Event::new(
-            "user",
-            crate::core::LlmResponse {
-                content: Some(user_content),
-                ..Default::default()
-            },
-        );
-        user_ev.invocation_id = invocation.invocation_id.clone();
+        if let Some(user_content) = user_content {
+            // Persist the user event before launching the agent.
+            let mut user_ev = Event::new(
+                "user",
+                crate::core::LlmResponse {
+                    content: Some(user_content),
+                    ..Default::default()
+                },
+            );
+            user_ev.invocation_id = invocation.invocation_id.clone();
 
-        #[cfg(feature = "auth")]
-        {
-            let outcome = crate::auth::AuthPreprocessor::new()
-                .process_event(
-                    &user_ev,
-                    &self.app_name,
-                    user_id,
-                    self.credential_service.clone(),
-                )
+            #[cfg(feature = "auth")]
+            {
+                let outcome = crate::auth::AuthPreprocessor::new()
+                    .process_event(
+                        &user_ev,
+                        &self.app_name,
+                        user_id,
+                        self.credential_service.clone(),
+                    )
+                    .await?;
+                let mut attrs = invocation.attributes.lock();
+                attrs.insert(
+                    "auth.resumed_tool_call_ids".into(),
+                    serde_json::to_value(outcome.resumed_tool_call_ids)?,
+                );
+                attrs.insert(
+                    "auth.resumed_toolset_ids".into(),
+                    serde_json::to_value(outcome.resumed_toolset_ids)?,
+                );
+            }
+
+            // Absorb tool-confirmation decisions (HITL) from the user event
+            // so the agent can replay the gated calls.
+            let confirmations = crate::core::ConfirmationPreprocessor::new()
+                .process_event(&user_ev)
+                .responses;
+            if !confirmations.is_empty() {
+                invocation.attributes.lock().insert(
+                    "confirmation.responses".into(),
+                    serde_json::to_value(confirmations)?,
+                );
+            }
+
+            // Atomic read-modify-write through the live Mutex — prevents
+            // concurrent writers from being silently overwritten.
+            self.session_service
+                .append_event_locked(&invocation.session, user_ev.clone())
                 .await?;
-            let mut attrs = invocation.attributes.lock();
-            attrs.insert(
-                "auth.resumed_tool_call_ids".into(),
-                serde_json::to_value(outcome.resumed_tool_call_ids)?,
-            );
-            attrs.insert(
-                "auth.resumed_toolset_ids".into(),
-                serde_json::to_value(outcome.resumed_toolset_ids)?,
-            );
         }
-
-        // Atomic read-modify-write through the live Mutex — prevents
-        // concurrent writers from being silently overwritten.
-        self.session_service
-            .append_event_locked(&invocation.session, user_ev.clone())
-            .await?;
 
         self.plugins.before_run(&invocation).await?;
 
         let agent = self.agent.clone();
+        let agent_name = self.agent.name().to_string();
+        let compaction = self.compaction.clone();
         let inv = invocation.clone();
         let svc = self.session_service.clone();
         let plugins = self.plugins.clone();
@@ -311,6 +390,32 @@ impl Runner {
                 }
             }
             plugins.after_run(&inv, None).await?;
+
+            // Best-effort event compaction after the invocation completes.
+            // Failures are logged, never surfaced — compaction is an
+            // optimization, not part of the run contract.
+            if let Some(cfg) = compaction.as_ref() {
+                let window = {
+                    let sess = inv.session.lock();
+                    crate::runner::compaction::compaction_window(&sess.events, cfg)
+                };
+                if let Some(window) = window {
+                    match cfg.summarizer.summarize(&window).await {
+                        Ok(Some(summary)) => {
+                            let ev = crate::runner::compaction::compaction_event(
+                                &agent_name,
+                                &window,
+                                summary,
+                            );
+                            if let Err(e) = svc.append_event_locked(&inv.session, ev).await {
+                                error!("failed to persist compaction event: {e}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => error!("event compaction failed: {e}"),
+                    }
+                }
+            }
         };
         Ok(RunningInvocation {
             invocation_id,
@@ -362,6 +467,9 @@ pub struct RunnerBuilder {
     credential_service: Option<Arc<dyn CredentialService>>,
     plugins: PluginManager,
     auto_create_session: bool,
+    context_cache_config: Option<crate::core::ContextCacheConfig>,
+    compaction: Option<crate::runner::EventsCompactionConfig>,
+    resumability: Option<crate::core::ResumabilityConfig>,
 }
 
 impl std::fmt::Debug for RunnerBuilder {
@@ -414,6 +522,32 @@ impl RunnerBuilder {
         self
     }
 
+    /// Enable explicit context caching for every invocation (cache-capable
+    /// providers cache the stable prefix — system instruction + tools —
+    /// server-side). Per-invocation `RunConfig::context_cache_config`
+    /// overrides this.
+    #[must_use]
+    pub fn context_cache_config(mut self, cfg: crate::core::ContextCacheConfig) -> Self {
+        self.context_cache_config = Some(cfg);
+        self
+    }
+
+    /// Enable automatic event compaction for long sessions.
+    #[must_use]
+    pub fn compaction(mut self, cfg: crate::runner::EventsCompactionConfig) -> Self {
+        self.compaction = Some(cfg);
+        self
+    }
+
+    /// Enable pause/resume of invocations: workflow agents record
+    /// checkpoints as sub-agents complete, and [`Runner::resume`] continues
+    /// a paused invocation from the last checkpoint.
+    #[must_use]
+    pub fn resumable(mut self, yes: bool) -> Self {
+        self.resumability = Some(crate::core::ResumabilityConfig { is_resumable: yes });
+        self
+    }
+
     /// Register a plugin.
     pub async fn plugin(mut self, p: Arc<dyn crate::runner::plugin::BasePlugin>) -> Result<Self> {
         self.plugins.register(p).await?;
@@ -437,6 +571,9 @@ impl RunnerBuilder {
             credential_service: self.credential_service,
             plugins: Arc::new(self.plugins),
             auto_create_session: self.auto_create_session,
+            context_cache_config: self.context_cache_config,
+            compaction: self.compaction,
+            resumability: self.resumability,
             active: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -590,6 +727,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runner_compacts_events_after_interval() {
+        use crate::runner::EventsCompactionConfig;
+
+        let m = Arc::new(MockModel::new("mock-1"));
+        // Two agent turns + one summarizer turn.
+        m.push_text("reply one");
+        m.push_text("reply two");
+        let summarizer_model = Arc::new(MockModel::new("mock-sum"));
+        summarizer_model.push_text("compact summary");
+
+        let agent = Arc::new(
+            LlmAgent::builder("a")
+                .model(m.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("hello")
+            .agent(agent)
+            .session_service(svc.clone())
+            .compaction(
+                EventsCompactionConfig::new(summarizer_model.clone() as Arc<dyn Model>)
+                    .compaction_interval(2)
+                    .overlap_size(0),
+            )
+            .build()
+            .unwrap();
+
+        let s1 = runner.run("u", None, "turn one").await.unwrap();
+        s1.collect::<Vec<_>>().await;
+        let sid = svc.list_sessions("hello", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let s2 = runner.run("u", Some(&sid), "turn two").await.unwrap();
+        s2.collect::<Vec<_>>().await;
+
+        let sess = svc
+            .get_session("hello", "u", &sid, GetSessionConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let comp = sess
+            .events
+            .iter()
+            .find(|e| e.actions.compaction.is_some())
+            .expect("compaction event appended after the second invocation");
+        let c = comp.actions.compaction.as_ref().unwrap();
+        assert!(
+            c.compacted_content
+                .text_concat()
+                .contains("compact summary"),
+            "summary content: {}",
+            c.compacted_content.text_concat()
+        );
+        // History assembly replaces compacted events with the summary.
+        let history = crate::core::history_with_compaction(&sess.events);
+        let texts: Vec<String> = history.iter().map(|c| c.text_concat()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("compact summary")),
+            "history should include the summary: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "turn one"),
+            "compacted events should be gone from history: {texts:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_unknown_id_returns_false() {
         let m = Arc::new(MockModel::new("mock-1"));
         m.push_text("ok");
@@ -722,6 +928,554 @@ mod tests {
         let err = s.next().await.unwrap().unwrap_err();
         assert!(err.to_string().contains("plugin event failed"));
         assert_eq!(plugin.after_errors.load(Ordering::SeqCst), 1);
+    }
+
+    fn confirm_tool(
+        name: &str,
+        executed: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> crate::tools::FunctionTool {
+        crate::tools::FunctionTool::from_async(
+            name,
+            "needs explicit approval",
+            None,
+            move |_args: serde_json::Value, _ctx: &mut crate::core::ToolContext| {
+                let executed = executed.clone();
+                async move {
+                    executed.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({"ok": true}))
+                }
+            },
+        )
+        .require_confirmation(true)
+    }
+
+    fn confirmation_reply(call_id: &str, confirmed: bool) -> Content {
+        use crate::genai_types::{FunctionResponse, Part, Role};
+        Content {
+            role: Role::User,
+            parts: vec![Part::FunctionResponse(FunctionResponse {
+                id: Some(call_id.into()),
+                name: crate::core::REQUEST_CONFIRMATION_FUNCTION_NAME.into(),
+                response: serde_json::json!({"confirmed": confirmed}),
+                will_continue: None,
+                scheduling: None,
+            })],
+        }
+    }
+
+    fn call_tool_response(name: &str, call_id: &str) -> crate::core::LlmResponse {
+        use crate::genai_types::{FunctionCall, Part, Role};
+        crate::core::LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::FunctionCall(
+                    FunctionCall::new(name, serde_json::json!({})).with_id(call_id),
+                )],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_confirmation_pauses_then_runs_after_approval() {
+        let m = Arc::new(MockModel::new("mock-1"));
+        m.push_response(call_tool_response("transfer_money", "call-1"));
+        m.push_text("transfer complete");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("bank")
+            .agent(Arc::new(
+                LlmAgent::builder("teller")
+                    .model(m.clone() as Arc<dyn Model>)
+                    .tool(Arc::new(confirm_tool("transfer_money", executed.clone())))
+                    .build()
+                    .unwrap(),
+            ))
+            .session_service(svc.clone())
+            .build()
+            .unwrap();
+
+        // Turn 1: the call is gated; the tool must NOT run.
+        let events: Vec<Event> = runner
+            .run("u", None, "send $100")
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "tool ran without approval"
+        );
+        let pending = events
+            .iter()
+            .flat_map(Event::function_responses)
+            .find(|fr| fr.name == crate::core::REQUEST_CONFIRMATION_FUNCTION_NAME)
+            .expect("confirmation request emitted");
+        assert_eq!(pending.id.as_deref(), Some("call-1"));
+        assert_eq!(pending.will_continue, Some(true));
+        let req_event = events
+            .iter()
+            .find(|e| !e.actions.requested_tool_confirmations.is_empty())
+            .expect("requested_tool_confirmations stamped");
+        assert!(
+            req_event
+                .actions
+                .requested_tool_confirmations
+                .contains_key("call-1")
+        );
+        // The request payload carries the original call.
+        assert_eq!(
+            pending.response["originalFunctionCall"]["name"],
+            serde_json::json!("transfer_money")
+        );
+
+        // Turn 2: approve. The tool runs and the model finishes.
+        let sid = svc.list_sessions("bank", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let events: Vec<Event> = runner
+            .run_with(
+                "u",
+                Some(&sid),
+                confirmation_reply("call-1", true),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "approved tool must run exactly once"
+        );
+        assert!(events.iter().any(|e| {
+            e.function_responses()
+                .iter()
+                .any(|fr| fr.name == "transfer_money" && fr.response["ok"] == true)
+        }));
+        let last = events.last().unwrap();
+        assert_eq!(
+            last.response.content.as_ref().unwrap().text_concat(),
+            "transfer complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_confirmation_denied_never_runs_tool() {
+        let m = Arc::new(MockModel::new("mock-1"));
+        m.push_response(call_tool_response("transfer_money", "call-2"));
+        m.push_text("understood, cancelled");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("bank")
+            .agent(Arc::new(
+                LlmAgent::builder("teller")
+                    .model(m.clone() as Arc<dyn Model>)
+                    .tool(Arc::new(confirm_tool("transfer_money", executed.clone())))
+                    .build()
+                    .unwrap(),
+            ))
+            .session_service(svc.clone())
+            .build()
+            .unwrap();
+
+        runner
+            .run("u", None, "send $100")
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let sid = svc.list_sessions("bank", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let events: Vec<Event> = runner
+            .run_with(
+                "u",
+                Some(&sid),
+                confirmation_reply("call-2", false),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "denied tool must not run"
+        );
+        assert!(events.iter().any(|e| {
+            e.function_responses().iter().any(|fr| {
+                fr.name == "transfer_money"
+                    && fr.response["error"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("rejected"))
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn resumable_sequential_resumes_from_paused_step() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-9"));
+        m2.push_text("deployed");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        let pipeline = Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .resumable(true)
+            .build()
+            .unwrap();
+
+        let handle = runner
+            .start(
+                "u",
+                None,
+                Content::user_text("ship it"),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        let events: Vec<Event> = handle
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e
+                .long_running_tool_ids
+                .as_ref()
+                .is_some_and(|v| !v.is_empty())),
+            "pipeline should pause on the confirmation gate"
+        );
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+
+        // Resume in place with the approval. Step one must NOT re-run (its
+        // mock model has no queued responses left, so a re-run would error).
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let resumed = runner
+            .resume(
+                "u",
+                &sid,
+                &inv_id,
+                Some(confirmation_reply("call-9", true)),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.invocation_id, inv_id);
+        let events: Vec<Event> = resumed
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "approved tool ran exactly once on resume"
+        );
+        assert!(events.iter().any(|e| {
+            e.response
+                .content
+                .as_ref()
+                .is_some_and(|c| c.text_concat() == "deployed")
+        }));
+        // The first step's model was called exactly once across both runs.
+        assert_eq!(m1.captured_requests().len(), 1);
+    }
+
+    /// Regression (P0): a confirmed call must be replayed exactly once even
+    /// when a LATER agent in the pipeline registers a tool with the same
+    /// name. Before the fix, `confirmation.responses` was never consumed and
+    /// replay wasn't author-scoped, so agent[2] re-executed the
+    /// user-confirmed action a second time.
+    #[tokio::test]
+    async fn confirmed_call_replays_once_despite_same_named_tool_downstream() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-7"));
+        m2.push_text("second done");
+        let m3 = Arc::new(MockModel::new("mock-3"));
+        m3.push_text("third done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        // Same tool NAME registered on the downstream agent.
+        let third = Arc::new(
+            LlmAgent::builder("third")
+                .model(m3.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        let pipeline =
+            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap());
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .resumable(true)
+            .build()
+            .unwrap();
+
+        let handle = runner
+            .start("u", None, Content::user_text("go"), RunConfig::default())
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        handle.events.collect::<Vec<_>>().await;
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let resumed = runner
+            .resume(
+                "u",
+                &sid,
+                &inv_id,
+                Some(confirmation_reply("call-7", true)),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        let events: Vec<Event> = resumed
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "confirmed tool must execute exactly once, not once per same-named registration"
+        );
+        assert!(
+            events.iter().any(|e| {
+                e.response
+                    .content
+                    .as_ref()
+                    .is_some_and(|c| c.text_concat() == "third done")
+            }),
+            "pipeline must run through to the last agent"
+        );
+    }
+
+    /// Regression (P0): when the agent AFTER the paused one does NOT have
+    /// the confirmed tool, resume must still complete the pipeline. Before
+    /// the fix, the stale resume attribute made agent[2]'s replay fail with
+    /// `ToolError::Unknown`, killing the run after a successful approval.
+    #[tokio::test]
+    async fn resume_completes_when_later_agent_lacks_the_confirmed_tool() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-8"));
+        m2.push_text("second done");
+        let m3 = Arc::new(MockModel::new("mock-3"));
+        m3.push_text("third done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        // No tools at all on the downstream agent.
+        let third = Arc::new(
+            LlmAgent::builder("third")
+                .model(m3.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let pipeline =
+            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap());
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .resumable(true)
+            .build()
+            .unwrap();
+
+        let handle = runner
+            .start("u", None, Content::user_text("go"), RunConfig::default())
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        handle.events.collect::<Vec<_>>().await;
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let resumed = runner
+            .resume(
+                "u",
+                &sid,
+                &inv_id,
+                Some(confirmation_reply("call-8", true)),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        let events: Vec<Event> = resumed
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .expect("resume must not fail with an unknown-tool error on downstream agents");
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| {
+            e.response
+                .content
+                .as_ref()
+                .is_some_and(|c| c.text_concat() == "third done")
+        }));
+    }
+
+    /// Regression (P0, author-scoping): in a NON-resumable flow the whole
+    /// pipeline re-runs on the confirmation turn, so agents BEFORE the
+    /// owner run first. They must skip the pending call (they didn't author
+    /// it) instead of failing with `ToolError::Unknown`, and the entry must
+    /// survive until the owning agent replays it.
+    #[tokio::test]
+    async fn confirmation_turn_skips_agents_that_do_not_own_the_call() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        m1.push_text("step one again");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-9"));
+        m2.push_text("second done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        let pipeline = Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        // NOT resumable: the confirmation arrives on a fresh invocation via
+        // run_with, and the pipeline restarts from the first agent.
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .build()
+            .unwrap();
+
+        runner
+            .run("u", None, "go")
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let events: Vec<Event> = runner
+            .run_with(
+                "u",
+                Some(&sid),
+                confirmation_reply("call-9", true),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .expect("first agent must not fail replaying a call it doesn't own");
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| {
+            e.response
+                .content
+                .as_ref()
+                .is_some_and(|c| c.text_concat() == "second done")
+        }));
     }
 
     #[cfg(feature = "auth")]

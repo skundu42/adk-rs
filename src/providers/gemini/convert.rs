@@ -25,6 +25,23 @@ pub(crate) struct WireRequest<'a> {
     pub generation_config: Option<GenerationConfig<'a>>,
     #[serde(skip_serializing_if = "is_empty_slice", rename = "safetySettings")]
     pub safety_settings: &'a [crate::genai_types::SafetySetting],
+    /// Reference to an explicit server-side cache entry. When set, the
+    /// cached fields (system instruction + tools) must be omitted.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "cachedContent")]
+    pub cached_content: Option<&'a str>,
+}
+
+/// Body for `POST /{version}/cachedContents`.
+#[derive(Debug, Serialize)]
+pub(crate) struct WireCachedContentCreate<'a> {
+    /// Fully-qualified model name, e.g. `models/gemini-2.5-flash`.
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "systemInstruction")]
+    pub system_instruction: Option<&'a Content>,
+    #[serde(skip_serializing_if = "is_empty_slice")]
+    pub tools: &'a [crate::genai_types::Tool],
+    /// TTL like `"1800s"`.
+    pub ttl: String,
 }
 
 fn is_empty_slice<T>(s: &&[T]) -> bool {
@@ -100,6 +117,21 @@ pub(crate) fn to_wire(req: &LlmRequest) -> WireRequest<'_> {
         tool_config: req.config.tool_config.as_ref(),
         generation_config: split_config(&req.config),
         safety_settings: &req.config.safety_settings,
+        cached_content: None,
+    }
+}
+
+/// Like [`to_wire`] but referencing an explicit cache entry: the cached
+/// prefix (system instruction + tools) is omitted from the body.
+pub(crate) fn to_wire_cached<'a>(req: &'a LlmRequest, cache_name: &'a str) -> WireRequest<'a> {
+    WireRequest {
+        contents: &req.contents,
+        system_instruction: None,
+        tools: &[],
+        tool_config: req.config.tool_config.as_ref(),
+        generation_config: split_config(&req.config),
+        safety_settings: &req.config.safety_settings,
+        cached_content: Some(cache_name),
     }
 }
 

@@ -116,7 +116,7 @@ cognitive_complexity = "allow"
 
 [package]
 name = "adk-rs"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -127,6 +127,9 @@ readme = "README.md"
 keywords = ["agent", "llm", "ai", "adk", "ai-sdk"]
 categories = ["api-bindings", "asynchronous"]
 description = "Rust port of the Google Agent Development Kit (ADK)."
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lints]
 workspace = true
@@ -217,11 +220,11 @@ http = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env", "wrap_help"], optional = true }
 
 # Proc-macro
-adk-rs-macros = { path = "adk-rs-macros", version = "0.1.0", optional = true }
+adk-rs-macros = { path = "adk-rs-macros", version = "0.3.0", optional = true }
 
 # Auth deps (feature = "auth")
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"], optional = true }
 rand = { version = "0.8", optional = true }
 
 # OpenAPI deps (feature = "openapi")

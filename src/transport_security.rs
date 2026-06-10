@@ -13,9 +13,8 @@
 //! - `127.0.0.0/8` (any IPv4 loopback)
 //! - `::1` (the sole IPv6 loopback)
 //!
-//! Mirrors [`crate::auth::security::secure_token_endpoint_url`] but is
-//! always compiled (no `auth` feature gate) and exposed throughout the
-//! crate.
+//! Mirrors the auth module's token endpoint validation but is always compiled
+//! (no `auth` feature gate) and exposed throughout the crate.
 
 use std::net::IpAddr;
 

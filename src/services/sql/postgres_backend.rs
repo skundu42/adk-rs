@@ -438,7 +438,7 @@ impl SessionService for SqlSessionService {
         if snapshot.events.last().map(|e| &e.id) == Some(&event.id) {
             snapshot.events.pop();
         }
-        let _ = self.append_event(&mut snapshot, event.clone()).await?;
+        self.append_event(&mut snapshot, event.clone()).await?;
         Ok(event)
     }
 }

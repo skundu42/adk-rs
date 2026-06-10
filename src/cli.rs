@@ -95,6 +95,10 @@ pub enum Command {
         /// default to prevent accidentally exposing the agent control plane.
         #[arg(long)]
         dangerously_allow_unauthenticated_remote: bool,
+        /// Origins allowed via CORS (repeatable). Needed when the adk-web
+        /// dev UI runs on a different origin, e.g. `http://localhost:4200`.
+        #[arg(long = "allow-origins")]
+        allow_origins: Vec<String>,
     },
     /// Run an eval set against a registered agent.
     Eval {
@@ -185,16 +189,18 @@ impl App {
                 bind,
                 auth_token,
                 dangerously_allow_unauthenticated_remote,
+                allow_origins,
             } => {
                 let mut runners = HashMap::new();
                 for (name, agent) in &self.agents {
-                    runners.insert(name.clone(), Arc::new(self.runner_for(agent.clone())));
+                    runners.insert(name.clone(), Arc::new(self.runner_for(agent.clone())?));
                 }
                 let runners = Arc::new(runners);
                 let state = match auth_token {
                     Some(t) => crate::server::AppState::with_bearer_token(runners, t),
                     None => crate::server::AppState::unauthenticated(runners),
-                };
+                }
+                .with_allow_origins(allow_origins);
                 info!("starting dev server on http://{bind}");
                 crate::server::serve_with(
                     bind,
@@ -247,17 +253,16 @@ impl App {
 
     fn build_runner(&self, agent_name: &str) -> crate::error::Result<Runner> {
         let agent = self.find_agent(agent_name)?;
-        Ok(self.runner_for(agent))
+        self.runner_for(agent)
     }
 
-    fn runner_for(&self, agent: Arc<dyn BaseAgent>) -> Runner {
+    fn runner_for(&self, agent: Arc<dyn BaseAgent>) -> crate::error::Result<Runner> {
         Runner::builder()
             .app_name(self.name.clone())
             .agent(agent)
             .session_service(Arc::new(InMemorySessionService::new()))
             .auto_create_session(true)
             .build()
-            .expect("Runner::build with default services must succeed")
     }
 }
 
