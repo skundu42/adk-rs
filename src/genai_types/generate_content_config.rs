@@ -49,6 +49,10 @@ pub enum HarmCategory {
     HarmCategoryDangerousContent,
     /// Civic integrity.
     HarmCategoryCivicIntegrity,
+    /// Catch-all for harm categories this crate doesn't know yet. Without
+    /// it a single unrecognised wire value would fail the whole response.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Threshold for blocking unsafe content.

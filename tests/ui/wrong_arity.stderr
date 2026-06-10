@@ -1,0 +1,5 @@
+error: #[adk_rs::tool] requires exactly two args: (args: T, ctx: &mut ToolContext)
+ --> tests/ui/wrong_arity.rs:9:15
+  |
+9 | async fn nope(_args: Args) -> adk_rs::Result<i32> {
+  |               ^^^^^^^^^^^

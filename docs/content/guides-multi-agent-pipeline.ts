@@ -16,7 +16,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3", features = ["gemini"] }
+adk-rs = { version = "0.6", features = ["gemini"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"`,
     },

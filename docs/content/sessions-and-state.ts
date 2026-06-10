@@ -76,7 +76,7 @@ export const page: DocPage = {
       kind: 'table',
       head: ['Type', 'Module', 'Feature', 'Notes'],
       rows: [
-        ['`InMemorySessionService`', '`adk_rs::services::mem`', 'always on', 'Volatile `DashMap` store. Keeps dedicated `app:`/`user:` stores so scoped keys are visible across sessions; `get_session` overlays app + user + session state (session keys win).'],
+        ['`InMemorySessionService`', '`adk_rs::services::mem`', 'always on', 'Volatile `DashMap` store. Keeps dedicated `app:`/`user:` stores so scoped keys are visible across sessions; `get_session` overlays app + user + session state (session keys win). Appends merge the event into the stored session (append with id-dedup, then apply the state delta) rather than replacing it with the caller’s snapshot, so concurrent invocations holding independent snapshots of the same session don’t lose each other’s events.'],
         ['`SqliteSessionService`', '`adk_rs::services::sql`', '`sqlite`', '`SqliteSessionService::connect("sqlite::memory:")` or `sqlite:///path.db`; runs its migrations on connect.'],
         ['`PostgresSessionService`', '`adk_rs::services::sql`', '`postgres`', 'Same API over `postgres://` URLs.'],
         ['`SqlSessionService`', '`adk_rs::services::sql`', '`sqlite` / `postgres`', 'Compatibility alias; points at SQLite when both backend features are enabled.'],

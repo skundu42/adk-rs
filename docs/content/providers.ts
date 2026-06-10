@@ -31,7 +31,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.5", features = ["gemini", "anthropic", "openai"] }`,
+adk-rs = { version = "0.6", features = ["gemini", "anthropic", "openai"] }`,
     },
     { kind: 'h2', text: 'Retries' },
     {
@@ -66,7 +66,7 @@ let model = Gemini::new("gemini-2.5-flash", GeminiConfig {
     { kind: 'h2', text: 'Gemini' },
     {
       kind: 'p',
-      text: 'The Gemini client speaks the `generateContent` REST API and real SSE streaming. `Gemini::from_env(model_name)` reads `$GOOGLE_API_KEY`; `Gemini::new(model_name, GeminiConfig)` gives full control. `GeminiConfig` has five fields: `base_url` (default `https://generativelanguage.googleapis.com`), `api_version` (default `v1beta`), `api_key`, `timeout` (default 60 s), and `retry`. The API key travels in the `x-goog-api-key` header.',
+      text: 'The Gemini client speaks the `generateContent` REST API and real SSE streaming. `Gemini::from_env(model_name)` reads `$GOOGLE_API_KEY`; `Gemini::new(model_name, GeminiConfig)` gives full control. `GeminiConfig` has five fields: `base_url` (default `https://generativelanguage.googleapis.com`), `api_version` (default `v1beta`), `api_key`, `timeout` (default 60 s), and `retry`. `timeout` is the total timeout for **non-streaming** requests only — streaming (SSE) requests are exempt, with just a 10-second connect timeout, so a long generation is never cut off mid-stream; the same rule applies to all three providers. The API key travels in the `x-goog-api-key` header.',
     },
     {
       kind: 'list',
@@ -88,6 +88,8 @@ let model = Gemini::new("gemini-2.5-flash", GeminiConfig {
         '**Streaming** — native SSE: text and thinking deltas are emitted as partial chunks the moment they arrive, tool-call arguments accumulate across `input_json_delta` fragments and surface as one complete `FunctionCall`, and the final chunk carries the stop reason and usage.',
         '**Multimodal input** — `Part::InlineData` images become base64 `image` blocks, inline PDFs become `document` blocks, and `https://` `Part::FileData` references become URL sources. Unsupported parts are dropped with a warning, never silently.',
         '**Prompt caching** — a [`ContextCacheConfig`](/docs/context-caching) on the request becomes a `cache_control` breakpoint on the system block (or the last tool when there is no system instruction), so Anthropic caches the stable prefix server-side. Cache activity surfaces on `event.response.cache_metadata` and `usage_metadata.cached_content_token_count`.',
+        '**Extended thinking** — `GenerateContentConfig.thinking_config.thinking_budget` maps to the Messages API `thinking` parameter (`{"type": "enabled", "budget_tokens": N}`). The default `max_tokens` grows to budget + 2048 so thinking never starves the answer (an explicit `max_output_tokens` is always respected), and `temperature`/`top_p`/`top_k` are dropped while thinking is enabled — the API rejects them together. Thinking blocks round-trip with their cryptographic signature, `redacted_thinking` blocks are preserved as `Part::RedactedThought`, and streaming handles `thinking_delta` + `signature_delta`.',
+        '**Forward compatibility** — unknown content-block types in responses are skipped instead of failing the whole response; the `refusal` stop reason maps to `FinishReason::Safety` and `pause_turn` to `Stop`.',
       ],
     },
     { kind: 'h2', text: 'OpenAI (and Azure, Ollama, Groq)' },
@@ -131,7 +133,7 @@ export OPENAI_API_KEY=gsk_...`,
     { kind: 'h2', text: 'Transport security: HTTPS or loopback' },
     {
       kind: 'p',
-      text: 'Every provider constructor validates its base URL with `transport_security::require_secure_url` before building the HTTP client. The rule: the destination must be `https://`, or a plaintext-HTTP **loopback** host (`localhost`, any `127.0.0.0/8` address, or `[::1]`). A public `http://` base URL is rejected with a configuration error rather than silently shipping your API key in cleartext. Loopback stays allowed so local mocks, Ollama, and test servers keep working.',
+      text: 'Every provider constructor validates its base URL with `transport_security::require_secure_url` before building the HTTP client. The rule: the destination must be `https://`, or a plaintext-HTTP **loopback** host (`localhost`, any `127.0.0.0/8` address, or `[::1]`). A public `http://` base URL is rejected with a configuration error rather than silently shipping your API key in cleartext. Loopback stays allowed so local mocks, Ollama, and test servers keep working. All three clients also disable HTTP redirects (`redirect::Policy::none()`) — reqwest re-sends custom headers on redirect, so a redirecting endpoint could otherwise exfiltrate the API key to another host.',
     },
     {
       kind: 'code',

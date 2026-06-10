@@ -1,35 +1,17 @@
-use std::net::IpAddr;
-
 use crate::error::{Error, Result};
 
 /// Validate token endpoints before transmitting credentials or assertions.
+/// Delegates the https-or-loopback policy to [`crate::transport_security`]
+/// (one parser, one policy) and additionally returns the parsed URL.
 pub(crate) fn secure_token_endpoint_url(raw_url: &str, field: &str) -> Result<reqwest::Url> {
     let url =
         reqwest::Url::parse(raw_url).map_err(|e| Error::config(format!("invalid {field}: {e}")))?;
-
-    if url.scheme() == "https" || is_loopback_http_url(&url) {
+    if crate::transport_security::is_secure_url(raw_url) {
         return Ok(url);
     }
-
     Err(Error::config(format!(
         "{field} must use https unless it points to localhost or a loopback IP"
     )))
-}
-
-fn is_loopback_http_url(url: &reqwest::Url) -> bool {
-    if url.scheme() != "http" {
-        return false;
-    }
-
-    match url.host_str() {
-        Some("localhost") => true,
-        Some(host) => host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback()),
-        None => false,
-    }
 }
 
 #[cfg(test)]

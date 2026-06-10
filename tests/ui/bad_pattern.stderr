@@ -1,0 +1,13 @@
+error: first arg must be a simple identifier
+  --> tests/ui/bad_pattern.rs:11:15
+   |
+11 | async fn nope(Args { x }: Args, _ctx: &mut ToolContext) -> adk_rs::Result<i32> {
+   |               ^^^^^^^^^^
+
+warning: unused import: `adk_rs::core::ToolContext`
+ --> tests/ui/bad_pattern.rs:3:5
+  |
+3 | use adk_rs::core::ToolContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default

@@ -65,6 +65,10 @@ pub struct InvocationContext {
     pub cancellation: CancellationToken,
     /// Free-form attribute bag for plugins / agent-specific bookkeeping.
     pub attributes: Arc<Mutex<HashMap<String, Value>>>,
+    /// Root of the agent tree for this invocation (set by the runner).
+    /// Agent transfer resolves targets from here, so an agent can reach
+    /// siblings and ancestors, not just its own subtree.
+    pub root_agent: Option<Arc<dyn crate::agents::BaseAgent>>,
 }
 
 impl std::fmt::Debug for InvocationContext {

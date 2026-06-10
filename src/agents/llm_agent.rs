@@ -9,8 +9,10 @@ use futures::future::BoxFuture;
 use tracing::{debug, instrument};
 
 use crate::core::{
-    DynTool, Event, EventActions, EventStream, InvocationContext, LlmRequest, LlmResponse, Model,
-    ReadonlyContext, ToolContext,
+    AfterAgentCallback, AfterModelCallback, AfterToolCallback, BeforeAgentCallback,
+    BeforeModelCallback, BeforeToolCallback, CallbackContext, DynTool, Event, EventActions,
+    EventStream, InvocationContext, LlmRequest, LlmResponse, Model, OnModelErrorCallback,
+    OnToolErrorCallback, ReadonlyContext, StateDelta, StreamingMode, ToolContext,
 };
 use crate::error::{Error, Result};
 use crate::genai_types::{Content, FunctionResponse, Part, Role, Schema};
@@ -51,8 +53,21 @@ impl std::fmt::Debug for Instruction {
     }
 }
 
+/// Lifecycle callbacks attached to an [`LlmAgent`] (mirrors Python ADK's
+/// `*_callback` fields). All optional; see [`crate::core::callback`].
+#[derive(Clone, Default)]
+struct AgentCallbacks {
+    before_agent: Option<BeforeAgentCallback>,
+    after_agent: Option<AfterAgentCallback>,
+    before_model: Option<BeforeModelCallback>,
+    after_model: Option<AfterModelCallback>,
+    on_model_error: Option<OnModelErrorCallback>,
+    before_tool: Option<BeforeToolCallback>,
+    after_tool: Option<AfterToolCallback>,
+    on_tool_error: Option<OnToolErrorCallback>,
+}
+
 /// LLM-powered agent.
-#[derive(Debug)]
 pub struct LlmAgent {
     name: String,
     description: String,
@@ -82,6 +97,18 @@ pub struct LlmAgent {
     /// Optional executor for `ExecutableCode` parts emitted by the model.
     #[cfg(feature = "code-exec")]
     code_executor: Option<Arc<dyn crate::code_exec::CodeExecutor>>,
+    /// Lifecycle callbacks.
+    callbacks: AgentCallbacks,
+}
+
+impl std::fmt::Debug for LlmAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmAgent")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("model", &self.model.name())
+            .finish_non_exhaustive()
+    }
 }
 
 impl LlmAgent {
@@ -128,6 +155,24 @@ impl BaseAgent for LlmAgent {
         let me = self.clone();
         let ctx2 = ctx.clone();
         let stream = try_stream! {
+            // before_agent: a returned content short-circuits the whole run.
+            if let Some(cb) = &me.callbacks.before_agent {
+                let mut cbctx = CallbackContext::new(ctx2.clone());
+                if let Some(content) = cb(&mut cbctx).await? {
+                    let mut e = Event::new(me.name.clone(), LlmResponse {
+                        content: Some(content),
+                        ..LlmResponse::default()
+                    });
+                    e.invocation_id = ctx2.invocation_id.clone();
+                    {
+                        let mut sess = ctx2.session.lock();
+                        sess.events.push(e.clone());
+                    }
+                    yield e;
+                    return;
+                }
+            }
+
             let (mut req, deferred_instructions) = build_request(&me, &ctx2).await?;
             let history: Vec<Content> = match me.include_contents {
                 IncludeContents::None => Vec::new(),
@@ -148,21 +193,30 @@ impl BaseAgent for LlmAgent {
                 req.contents.push(Content::user_text(text));
             }
 
-            let replayed_responses = replay_resumed_tool_calls(&ctx2, &req, &me.name).await?;
-            if !replayed_responses.is_empty() {
-                let replay_event = function_response_event(
+            let replayed = replay_resumed_tool_calls(&ctx2, &req, &me).await?;
+            if !replayed.responses.is_empty() {
+                let mut replay_event = function_response_event(
                     &me.name,
                     &ctx2.invocation_id,
-                    replayed_responses.clone(),
+                    replayed.responses.clone(),
                 );
+                replay_event.actions.state_delta = replayed.state_delta;
+                replay_event.actions.artifact_delta = replayed.artifact_delta;
+                if replayed.skip_summarization {
+                    replay_event.actions.skip_summarization = Some(true);
+                }
                 {
                     let mut sess = ctx2.session.lock();
                     sess.events.push(replay_event.clone());
                 }
                 yield replay_event;
+                if replayed.skip_summarization {
+                    return;
+                }
                 req.contents.push(Content {
                     role: Role::Tool,
-                    parts: replayed_responses
+                    parts: replayed
+                        .responses
                         .into_iter()
                         .map(Part::FunctionResponse)
                         .collect(),
@@ -182,7 +236,87 @@ impl BaseAgent for LlmAgent {
                 }
                 ctx2.check_and_inc_llm_call()?;
                 debug!("LLM call iteration {}", _iter);
-                let resp = me.model.generate_content(req.clone()).await?;
+
+                // before_model: may rewrite the request in place or
+                // short-circuit the call with a synthetic response.
+                let mut model_override = None;
+                if let Some(cb) = &me.callbacks.before_model {
+                    let mut cbctx = CallbackContext::new(ctx2.clone());
+                    model_override = cb(&mut cbctx, &mut req).await?;
+                }
+                let attempt: Result<LlmResponse> = if let Some(r) = model_override {
+                    Ok(r)
+                } else {
+                    match ctx2.run_config.streaming_mode {
+                        StreamingMode::None => me.model.generate_content(req.clone()).await,
+                        StreamingMode::Sse => {
+                            // Token streaming: surface each content-bearing
+                            // chunk as a `partial` event (the runner does not
+                            // persist partials), then continue the loop on
+                            // the aggregated response, which is persisted as
+                            // usual.
+                            match me.model.stream_generate_content(req.clone()).await {
+                                Err(e) => Err(e),
+                                Ok(mut chunks) => {
+                                    let mut agg = LlmResponse::default();
+                                    let mut stream_err = None;
+                                    while let Some(chunk) = chunks.next().await {
+                                        let chunk = match chunk {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                stream_err = Some(e);
+                                                break;
+                                            }
+                                        };
+                                        let has_content = chunk
+                                            .content
+                                            .as_ref()
+                                            .is_some_and(|c| !c.parts.is_empty());
+                                        if has_content {
+                                            let mut pe = response_to_event(
+                                                &me.name,
+                                                &ctx2.invocation_id,
+                                                chunk.clone(),
+                                            );
+                                            pe.partial = Some(true);
+                                            pe.turn_complete = None;
+                                            yield pe;
+                                        }
+                                        merge_stream_chunk(&mut agg, chunk);
+                                    }
+                                    match stream_err {
+                                        Some(e) => Err(e),
+                                        None => Ok(agg),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                let mut resp = match attempt {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // on_model_error: a returned response recovers the
+                        // turn; otherwise the error propagates as before.
+                        let mut recovered = None;
+                        if let Some(cb) = &me.callbacks.on_model_error {
+                            let mut cbctx = CallbackContext::new(ctx2.clone());
+                            recovered = cb(&mut cbctx, &mut req, &e).await?;
+                        }
+                        match recovered {
+                            Some(r) => r,
+                            None => Err(e)?,
+                        }
+                    }
+                };
+                // after_model: may rewrite the response.
+                if let Some(cb) = &me.callbacks.after_model {
+                    let mut cbctx = CallbackContext::new(ctx2.clone());
+                    if let Some(r) = cb(&mut cbctx, &mut resp).await? {
+                        resp = r;
+                    }
+                }
+                let resp = resp;
                 let mut event = response_to_event(&me.name, &ctx2.invocation_id, resp.clone());
 
                 // Gemini may omit `FunctionCall.id`. Synthesize a stable id
@@ -307,6 +441,23 @@ impl BaseAgent for LlmAgent {
                         }
                     }
                     yield event;
+                    // after_agent: a returned content is appended as one
+                    // more event after the agent's own final response.
+                    if let Some(cb) = &me.callbacks.after_agent {
+                        let mut cbctx = CallbackContext::new(ctx2.clone());
+                        if let Some(content) = cb(&mut cbctx).await? {
+                            let mut e = Event::new(me.name.clone(), LlmResponse {
+                                content: Some(content),
+                                ..LlmResponse::default()
+                            });
+                            e.invocation_id = ctx2.invocation_id.clone();
+                            {
+                                let mut sess = ctx2.session.lock();
+                                sess.events.push(e.clone());
+                            }
+                            yield e;
+                        }
+                    }
                     return;
                 }
 
@@ -318,10 +469,14 @@ impl BaseAgent for LlmAgent {
                 // Resolve each call by dispatching the tool through the
                 // gate pipeline (confirmation → auth → run).
                 let mut tool_responses = Vec::with_capacity(calls.len());
-                let mut transfer: Option<String> = None;
+                let mut transfer: Option<Arc<dyn BaseAgent>> = None;
                 let mut escalate = false;
                 let mut long_running_any = false;
                 let mut long_running_tool_ids = Vec::new();
+                let mut merged_state_delta = StateDelta::new();
+                let mut merged_artifact_delta: indexmap::IndexMap<String, u64> =
+                    Default::default();
+                let mut skip_summarization = false;
                 let mut requested_confirmations: indexmap::IndexMap<
                     String,
                     crate::core::ToolConfirmation,
@@ -339,14 +494,14 @@ impl BaseAgent for LlmAgent {
                         tctx.function_call_id = Some(id.clone());
                     }
 
-                    let outcome = dispatch_tool_call(tool.as_ref(), fc, &mut tctx).await?;
+                    let outcome = dispatch_tool_call(&tool, fc, &mut tctx, &me.callbacks).await?;
 
-                    if let Some(t) = tctx.transfer_to_agent.take() {
-                        if !me.disable_transfer { transfer = Some(t); }
-                    }
                     if tctx.escalate { escalate = true; }
+                    merged_state_delta.extend(std::mem::take(&mut tctx.state_delta));
+                    merged_artifact_delta.extend(std::mem::take(&mut tctx.artifact_delta));
+                    if tctx.skip_summarization { skip_summarization = true; }
                     let pending_name = outcome.pending_response_name();
-                    let value = match outcome {
+                    let mut value = match outcome {
                         ToolDispatch::Completed(v) | ToolDispatch::AuthPending(v) => v,
                         ToolDispatch::ConfirmationPending(v, confirmation) => {
                             requested_confirmations.insert(
@@ -356,6 +511,24 @@ impl BaseAgent for LlmAgent {
                             v
                         }
                     };
+                    if let Some(t) = tctx.transfer_to_agent.take() {
+                        if !me.disable_transfer {
+                            match resolve_transfer_target(&me, &ctx2, &t) {
+                                Some(target) => transfer = Some(target),
+                                None => {
+                                    // A hallucinated or unreachable target is
+                                    // a recoverable mistake: feed the model an
+                                    // error it can react to instead of
+                                    // aborting the whole invocation.
+                                    value = serde_json::json!({
+                                        "error": format!(
+                                            "unknown agent `{t}`; transfer not performed"
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                    }
                     let will_continue = if tool.is_long_running()
                         || tctx.long_running
                         || pending_name.is_some()
@@ -380,13 +553,22 @@ impl BaseAgent for LlmAgent {
                     );
                 }
 
-                // Emit a tool-response event.
+                // Emit a tool-response event. Tool-written deltas ride on the
+                // event's actions so `append_event_locked` persists them.
                 let mut tool_event = function_response_event(&me.name, &ctx2.invocation_id, tool_responses.clone());
                 if !long_running_tool_ids.is_empty() {
                     tool_event.long_running_tool_ids = Some(long_running_tool_ids);
                 }
                 if !requested_confirmations.is_empty() {
                     tool_event.actions.requested_tool_confirmations = requested_confirmations;
+                }
+                tool_event.actions.state_delta = merged_state_delta;
+                tool_event.actions.artifact_delta = merged_artifact_delta;
+                if skip_summarization {
+                    tool_event.actions.skip_summarization = Some(true);
+                }
+                if let Some(t) = &transfer {
+                    tool_event.actions.transfer_to_agent = Some(t.name().to_string());
                 }
                 {
                     let mut sess = ctx2.session.lock();
@@ -395,10 +577,7 @@ impl BaseAgent for LlmAgent {
                 yield tool_event;
 
                 // Apply transfer / escalate before next turn.
-                if let Some(target) = transfer {
-                    let sub = me
-                        .find_agent(&target)
-                        .ok_or_else(|| Error::not_found(format!("agent {target}")))?;
+                if let Some(sub) = transfer {
                     let mut sub_stream = Box::pin(sub.run(ctx2.clone()).await?);
                     while let Some(ev) = sub_stream.next().await {
                         yield ev?;
@@ -423,6 +602,11 @@ impl BaseAgent for LlmAgent {
                         .insert("invocation.paused".into(), serde_json::Value::Bool(true));
                     return;
                 }
+                if skip_summarization {
+                    // A tool marked its response as final: stop here instead
+                    // of sending the result back through the model.
+                    return;
+                }
 
                 // Update conversation history with assistant call + tool resp.
                 if let Some(c) = assistant_content { req.contents.push(c); }
@@ -443,6 +627,21 @@ impl BaseAgent for LlmAgent {
             });
             e.invocation_id = ctx2.invocation_id.clone();
             yield e;
+            if let Some(cb) = &me.callbacks.after_agent {
+                let mut cbctx = CallbackContext::new(ctx2.clone());
+                if let Some(content) = cb(&mut cbctx).await? {
+                    let mut e = Event::new(me.name.clone(), LlmResponse {
+                        content: Some(content),
+                        ..LlmResponse::default()
+                    });
+                    e.invocation_id = ctx2.invocation_id.clone();
+                    {
+                        let mut sess = ctx2.session.lock();
+                        sess.events.push(e.clone());
+                    }
+                    yield e;
+                }
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -504,7 +703,60 @@ async fn build_request(
         t.process_llm_request(&mut req, &mut tctx).await?;
         req.tools_dict.insert(t.name().to_string(), t.clone());
     }
+
+    // Agent transfer: declared sub-agents auto-register the transfer tool
+    // and are advertised to the model (mirrors Python ADK) — without this,
+    // `.sub_agent(...)` would be inert unless the user wired both by hand.
+    if !agent.sub_agents.is_empty() && !agent.disable_transfer {
+        let mut roster =
+            String::from("You have a list of other agents to transfer the conversation to:\n");
+        for sub in &agent.sub_agents {
+            roster.push_str(&format!(
+                "\nAgent name: {}\nAgent description: {}\n",
+                sub.name(),
+                sub.description()
+            ));
+        }
+        roster.push_str(
+            "\nIf you are the best to answer the question according to your description, \
+             answer it yourself. If another agent is better suited according to its \
+             description, call the `transfer_to_agent` function with that agent's name. \
+             When transferring, do not generate any text other than the function call.",
+        );
+        // The roster is static per agent, so the system prefix stays
+        // cache-stable across turns.
+        req.append_system_text(&roster);
+
+        if !req.tools_dict.contains_key("transfer_to_agent") {
+            let t = crate::tools::transfer_to_agent_tool();
+            t.process_llm_request(&mut req, &mut tctx).await?;
+            req.tools_dict.insert(t.name().to_string(), t);
+        }
+    }
     Ok((req, deferred))
+}
+
+/// Resolve a transfer target by name: the agent's own subtree first, then
+/// the whole tree from the invocation root, which reaches siblings and
+/// ancestors. Self-transfer resolves to `None` — it could only loop.
+fn resolve_transfer_target(
+    me: &LlmAgent,
+    ctx: &InvocationContext,
+    target: &str,
+) -> Option<Arc<dyn BaseAgent>> {
+    if target == me.name {
+        return None;
+    }
+    if let Some(found) = me.find_agent(target) {
+        return Some(found);
+    }
+    if let Some(root) = &ctx.root_agent {
+        if root.name() == target {
+            return Some(root.clone());
+        }
+        return root.find_agent(target);
+    }
+    None
 }
 
 /// Static instructions get `{state_key}` templating (mirrors Python, where
@@ -548,6 +800,62 @@ fn output_value(event: &Event, structured: bool) -> Option<serde_json::Value> {
         }
     } else {
         Some(serde_json::Value::String(text))
+    }
+}
+
+/// Fold one streamed chunk into the aggregated response that the agent loop
+/// (and the session) will see. Adjacent `Text`/`Thought` deltas concatenate;
+/// any other parts (tool calls arrive whole) append in order. Metadata —
+/// finish reason, usage, model version, errors — comes from whichever chunk
+/// carries it (providers send it on the final chunk).
+fn merge_stream_chunk(agg: &mut LlmResponse, chunk: LlmResponse) {
+    if let Some(c) = chunk.content {
+        let target = agg.content.get_or_insert_with(|| Content {
+            role: c.role,
+            parts: Vec::new(),
+        });
+        for p in c.parts {
+            match (target.parts.last_mut(), p) {
+                (Some(Part::Text(acc)), Part::Text(t)) => acc.push_str(&t),
+                (Some(Part::Thought(acc)), Part::Thought(t)) => {
+                    acc.text.push_str(&t.text);
+                    // Providers stream the signature as a trailing
+                    // signature-only chunk; adopt it onto the accumulated
+                    // thought so the final part replays verbatim.
+                    if t.signature.is_some() {
+                        acc.signature = t.signature;
+                    }
+                }
+                (_, p) => target.parts.push(p),
+            }
+        }
+    }
+    if chunk.model_version.is_some() {
+        agg.model_version = chunk.model_version;
+    }
+    if chunk.finish_reason.is_some() {
+        agg.finish_reason = chunk.finish_reason;
+    }
+    if chunk.usage_metadata.is_some() {
+        agg.usage_metadata = chunk.usage_metadata;
+    }
+    if chunk.cache_metadata.is_some() {
+        agg.cache_metadata = chunk.cache_metadata;
+    }
+    if chunk.grounding_metadata.is_some() {
+        agg.grounding_metadata = chunk.grounding_metadata;
+    }
+    if chunk.citation_metadata.is_some() {
+        agg.citation_metadata = chunk.citation_metadata;
+    }
+    if chunk.error_code.is_some() {
+        agg.error_code = chunk.error_code;
+    }
+    if chunk.error_message.is_some() {
+        agg.error_message = chunk.error_message;
+    }
+    if chunk.interrupted.is_some() {
+        agg.interrupted = chunk.interrupted;
     }
 }
 
@@ -628,18 +936,29 @@ fn function_response_event(
     }
 }
 
+/// Tool responses (and the deltas the tools wrote) produced by replaying
+/// resumed tool calls after a confirmation/auth pause.
+#[derive(Default)]
+struct ReplayedToolCalls {
+    responses: Vec<FunctionResponse>,
+    state_delta: StateDelta,
+    artifact_delta: indexmap::IndexMap<String, u64>,
+    skip_summarization: bool,
+}
+
 async fn replay_resumed_tool_calls(
     ctx: &Arc<InvocationContext>,
     req: &LlmRequest,
-    agent_name: &str,
-) -> Result<Vec<FunctionResponse>> {
+    agent: &LlmAgent,
+) -> Result<ReplayedToolCalls> {
+    let agent_name = agent.name();
     let ids = resumed_tool_call_ids(ctx);
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ReplayedToolCalls::default());
     }
 
     let events = ctx.session.lock().events.clone();
-    let mut responses = Vec::new();
+    let mut out = ReplayedToolCalls::default();
     let mut consumed: Vec<String> = Vec::new();
     for id in ids {
         // Replay is scoped to the agent that owns the pending call: the
@@ -667,7 +986,14 @@ async fn replay_resumed_tool_calls(
         };
         let mut tctx = ToolContext::new(ctx.clone());
         tctx.function_call_id = fc.id.clone();
-        let outcome = dispatch_tool_call(tool.as_ref(), &fc, &mut tctx).await?;
+        let outcome = dispatch_tool_call(&tool, &fc, &mut tctx, &agent.callbacks).await?;
+        out.state_delta
+            .extend(std::mem::take(&mut tctx.state_delta));
+        out.artifact_delta
+            .extend(std::mem::take(&mut tctx.artifact_delta));
+        if tctx.skip_summarization {
+            out.skip_summarization = true;
+        }
         // Consume the id so later agents in this invocation (or later
         // iterations of this one under LoopAgent) don't replay it again —
         // without this, a user-confirmed tool would execute once per
@@ -679,7 +1005,7 @@ async fn replay_resumed_tool_calls(
             | ToolDispatch::AuthPending(v)
             | ToolDispatch::ConfirmationPending(v, _) => v,
         };
-        responses.push(FunctionResponse {
+        out.responses.push(FunctionResponse {
             id: fc.id.clone(),
             name: pending_name
                 .map(str::to_string)
@@ -690,7 +1016,7 @@ async fn replay_resumed_tool_calls(
         });
     }
     consume_resumed_ids(ctx, &consumed);
-    Ok(responses)
+    Ok(out)
 }
 
 /// Remove replayed call ids from the invocation-wide resume attributes
@@ -799,11 +1125,14 @@ fn confirmation_response_for(
 /// 2. **Auth** (`feature = "auth"`) — resolve the tool's credential;
 ///    defer with an `adk_request_credential` payload when interactive
 ///    consent is needed.
-/// 3. **Run** — dispatch the tool; errors become `{"error": ...}` values.
+/// 3. **Run** — `before_tool` may rewrite the args or short-circuit; the
+///    tool runs; `after_tool` may rewrite the result; errors go through
+///    `on_tool_error` and otherwise become `{"error": ...}` values.
 async fn dispatch_tool_call(
-    tool: &dyn DynTool,
+    tool: &Arc<dyn DynTool>,
     fc: &crate::genai_types::FunctionCall,
     tctx: &mut ToolContext,
+    cbs: &AgentCallbacks,
 ) -> Result<ToolDispatch> {
     if tool.requires_confirmation(&fc.args) {
         match confirmation_response_for(&tctx.invocation, fc.id.as_deref()) {
@@ -862,9 +1191,33 @@ async fn dispatch_tool_call(
         }
     }
 
-    let value = match tool.run(fc.args.clone(), tctx).await {
-        Ok(v) => v,
-        Err(e) => serde_json::json!({"error": e.to_string()}),
+    // before_tool: may rewrite the args in place or short-circuit with a
+    // ready-made result (the tool is not run).
+    let mut args = fc.args.clone();
+    if let Some(cb) = &cbs.before_tool {
+        if let Some(v) = cb(tctx, tool, &mut args).await? {
+            return Ok(ToolDispatch::Completed(v));
+        }
+    }
+    let value = match tool.run(args.clone(), tctx).await {
+        Ok(mut v) => {
+            // after_tool: may rewrite the result.
+            if let Some(cb) = &cbs.after_tool {
+                if let Some(replacement) = cb(tctx, tool, &args, &mut v).await? {
+                    v = replacement;
+                }
+            }
+            v
+        }
+        Err(e) => {
+            // on_tool_error: a returned value recovers the call; otherwise
+            // the error is surfaced to the model as `{"error": ...}`.
+            let mut recovered = None;
+            if let Some(cb) = &cbs.on_tool_error {
+                recovered = cb(tctx, tool, &args, &e).await?;
+            }
+            recovered.unwrap_or_else(|| serde_json::json!({"error": e.to_string()}))
+        }
     };
     Ok(ToolDispatch::Completed(value))
 }
@@ -887,6 +1240,7 @@ pub struct LlmAgentBuilder {
     include_contents: IncludeContents,
     #[cfg(feature = "code-exec")]
     code_executor: Option<Arc<dyn crate::code_exec::CodeExecutor>>,
+    callbacks: AgentCallbacks,
 }
 
 impl LlmAgentBuilder {
@@ -966,14 +1320,19 @@ impl LlmAgentBuilder {
         self
     }
 
-    /// Register a sub-agent.
+    /// Register a sub-agent. Declaring at least one sub-agent (unless
+    /// [`Self::disable_transfer`] is set) auto-registers the
+    /// `transfer_to_agent` tool and advertises the sub-agents' names and
+    /// descriptions to the model, so it can delegate.
     #[must_use]
     pub fn sub_agent(mut self, a: Arc<dyn BaseAgent>) -> Self {
         self.sub_agents.push(a);
         self
     }
 
-    /// Disable transfer-to-agent tool emission.
+    /// Disable agent transfer: the `transfer_to_agent` tool is not
+    /// registered, sub-agents are not advertised, and any transfer a tool
+    /// requests is ignored.
     #[must_use]
     pub fn disable_transfer(mut self, yes: bool) -> Self {
         self.disable_transfer = yes;
@@ -1020,6 +1379,71 @@ impl LlmAgentBuilder {
         self
     }
 
+    /// Hook invoked before the agent runs. Returning `Some(content)`
+    /// short-circuits the run with that content as the sole response.
+    #[must_use]
+    pub fn before_agent_callback(mut self, cb: BeforeAgentCallback) -> Self {
+        self.callbacks.before_agent = Some(cb);
+        self
+    }
+
+    /// Hook invoked after the agent completes. Returning `Some(content)`
+    /// appends one more event carrying that content.
+    #[must_use]
+    pub fn after_agent_callback(mut self, cb: AfterAgentCallback) -> Self {
+        self.callbacks.after_agent = Some(cb);
+        self
+    }
+
+    /// Hook invoked before every model call. May rewrite the outgoing
+    /// [`LlmRequest`] in place, or return `Some(response)` to skip the
+    /// model call entirely (e.g. guardrails, caching, mocking).
+    #[must_use]
+    pub fn before_model_callback(mut self, cb: BeforeModelCallback) -> Self {
+        self.callbacks.before_model = Some(cb);
+        self
+    }
+
+    /// Hook invoked after every model call; returning `Some(response)`
+    /// replaces the model's response.
+    #[must_use]
+    pub fn after_model_callback(mut self, cb: AfterModelCallback) -> Self {
+        self.callbacks.after_model = Some(cb);
+        self
+    }
+
+    /// Hook invoked when a model call fails; returning `Some(response)`
+    /// recovers the turn instead of failing the run.
+    #[must_use]
+    pub fn on_model_error_callback(mut self, cb: OnModelErrorCallback) -> Self {
+        self.callbacks.on_model_error = Some(cb);
+        self
+    }
+
+    /// Hook invoked before every tool run. May rewrite the args in place,
+    /// or return `Some(value)` to skip the tool and use that result.
+    #[must_use]
+    pub fn before_tool_callback(mut self, cb: BeforeToolCallback) -> Self {
+        self.callbacks.before_tool = Some(cb);
+        self
+    }
+
+    /// Hook invoked after every tool run; returning `Some(value)` replaces
+    /// the tool's result.
+    #[must_use]
+    pub fn after_tool_callback(mut self, cb: AfterToolCallback) -> Self {
+        self.callbacks.after_tool = Some(cb);
+        self
+    }
+
+    /// Hook invoked when a tool run fails; returning `Some(value)` recovers
+    /// the call (otherwise the model sees `{"error": ...}`).
+    #[must_use]
+    pub fn on_tool_error_callback(mut self, cb: OnToolErrorCallback) -> Self {
+        self.callbacks.on_tool_error = Some(cb);
+        self
+    }
+
     /// Build.
     pub fn build(self) -> Result<LlmAgent> {
         let model = self
@@ -1044,6 +1468,7 @@ impl LlmAgentBuilder {
             include_contents: self.include_contents,
             #[cfg(feature = "code-exec")]
             code_executor: self.code_executor,
+            callbacks: self.callbacks,
         })
     }
 }
@@ -1078,6 +1503,7 @@ mod tests {
             llm_call_count: Arc::new(Mutex::new(0)),
             cancellation: Default::default(),
             attributes: Arc::new(Mutex::new(HashMap::new())),
+            root_agent: None,
         })
     }
 
@@ -1267,6 +1693,595 @@ mod tests {
             .unwrap_or_default();
         assert!(sys.contains("Speak in French."), "got: {sys}");
         assert!(sys.contains("Audience: ."), "got: {sys}");
+    }
+
+    /// All wired callbacks fire: before_model rewrites the request,
+    /// after_model rewrites the response, before/after_tool see the call,
+    /// after_agent appends a trailing event.
+    #[tokio::test]
+    async fn callbacks_fire_through_the_loop() {
+        use crate::genai_types::{FunctionCall, Role};
+        use crate::tools::FunctionTool;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_response(LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::FunctionCall(
+                    FunctionCall::new("echo", serde_json::json!({"v": 1})).with_id("fc-1"),
+                )],
+            }),
+            ..Default::default()
+        });
+        model.push_text("raw final");
+
+        let before_tool_saw = Arc::new(AtomicBool::new(false));
+        let bts = before_tool_saw.clone();
+
+        let tool =
+            FunctionTool::from_async("echo", "echoes", None, |args, _ctx| async move { Ok(args) });
+        let agent = Arc::new(
+            LlmAgent::builder("hooked")
+                .model(model.clone() as Arc<dyn Model>)
+                .tool(Arc::new(tool))
+                .before_model_callback(Arc::new(|_cbctx, req| {
+                    Box::pin(async move {
+                        req.append_system_text("INJECTED");
+                        Ok(None)
+                    })
+                }))
+                .after_model_callback(Arc::new(|_cbctx, resp| {
+                    let is_final = resp.function_calls().is_empty();
+                    Box::pin(async move {
+                        Ok(is_final.then(|| LlmResponse {
+                            content: Some(Content::model_text("rewritten final")),
+                            ..LlmResponse::default()
+                        }))
+                    })
+                }))
+                .before_tool_callback(Arc::new(move |_tctx, _tool, args| {
+                    bts.store(true, Ordering::SeqCst);
+                    args["v"] = serde_json::json!(2);
+                    Box::pin(async move { Ok(None) })
+                }))
+                .after_tool_callback(Arc::new(|_tctx, _tool, _args, result| {
+                    result["stamped"] = serde_json::json!(true);
+                    Box::pin(async move { Ok(None) })
+                }))
+                .after_agent_callback(Arc::new(|_cbctx| {
+                    Box::pin(async move { Ok(Some(Content::model_text("after-agent"))) })
+                }))
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = build_ctx(svc, "go");
+        let mut stream = agent.run(ctx).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+
+        // before_model injected into the system instruction.
+        let reqs = model.captured_requests();
+        assert!(
+            reqs[0]
+                .config
+                .system_instruction
+                .as_ref()
+                .unwrap()
+                .text_concat()
+                .contains("INJECTED")
+        );
+        // before_tool ran and rewrote args; after_tool stamped the result.
+        assert!(before_tool_saw.load(Ordering::SeqCst));
+        let tool_event = events
+            .iter()
+            .find(|e| !e.function_responses().is_empty())
+            .unwrap();
+        let fr = &tool_event.function_responses()[0];
+        assert_eq!(fr.response["v"], serde_json::json!(2));
+        assert_eq!(fr.response["stamped"], serde_json::json!(true));
+        // after_model replaced the final text; after_agent appended one more.
+        let texts: Vec<String> = events
+            .iter()
+            .filter_map(|e| e.response.content.as_ref().map(|c| c.text_concat()))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(texts.contains(&"rewritten final".to_string()));
+        assert_eq!(
+            events
+                .last()
+                .unwrap()
+                .response
+                .content
+                .as_ref()
+                .unwrap()
+                .text_concat(),
+            "after-agent"
+        );
+    }
+
+    /// before_agent returning content short-circuits the run: no model call.
+    #[tokio::test]
+    async fn before_agent_short_circuits() {
+        let model = Arc::new(MockModel::new("mock-1"));
+        // No queued response: a model call would error.
+        let agent = Arc::new(
+            LlmAgent::builder("gated")
+                .model(model.clone() as Arc<dyn Model>)
+                .before_agent_callback(Arc::new(|_cbctx| {
+                    Box::pin(async move { Ok(Some(Content::model_text("blocked"))) })
+                }))
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = build_ctx(svc, "hi");
+        let mut stream = agent.run(ctx).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].response.content.as_ref().unwrap().text_concat(),
+            "blocked"
+        );
+        assert!(model.captured_requests().is_empty());
+    }
+
+    /// `StreamingMode::Sse` surfaces token-level partial events and ends the
+    /// turn with one aggregated, persistable final event.
+    #[tokio::test]
+    async fn streaming_mode_sse_yields_partials_then_aggregated_final() {
+        #[derive(Debug)]
+        struct StreamingModel;
+        #[async_trait]
+        impl Model for StreamingModel {
+            fn name(&self) -> &str {
+                "stream-mock"
+            }
+            fn supported_models(&self) -> &'static [&'static str] {
+                &["stream-mock"]
+            }
+            async fn generate_content(
+                &self,
+                _req: LlmRequest,
+            ) -> crate::error::Result<LlmResponse> {
+                panic!("SSE mode must call stream_generate_content");
+            }
+            async fn stream_generate_content(
+                &self,
+                _req: LlmRequest,
+            ) -> crate::error::Result<crate::core::LlmResponseStream> {
+                let chunks = vec![
+                    Ok(LlmResponse {
+                        content: Some(Content::model_text("Hel")),
+                        ..Default::default()
+                    }),
+                    Ok(LlmResponse {
+                        content: Some(Content::model_text("lo")),
+                        ..Default::default()
+                    }),
+                    Ok(LlmResponse {
+                        finish_reason: Some(crate::genai_types::FinishReason::Stop),
+                        ..Default::default()
+                    }),
+                ];
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            }
+        }
+
+        let agent = Arc::new(
+            LlmAgent::builder("streamer")
+                .model(Arc::new(StreamingModel) as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = Arc::new(InvocationContext {
+            run_config: RunConfig {
+                streaming_mode: StreamingMode::Sse,
+                ..Default::default()
+            },
+            ..(*build_ctx(svc, "hi")).clone()
+        });
+        let mut stream = agent.run(ctx.clone()).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        let partials: Vec<&Event> = events.iter().filter(|e| e.partial == Some(true)).collect();
+        assert_eq!(partials.len(), 2);
+        assert_eq!(
+            partials[0].response.content.as_ref().unwrap().text_concat(),
+            "Hel"
+        );
+        let last = events.last().unwrap();
+        assert_ne!(last.partial, Some(true));
+        assert_eq!(
+            last.response.content.as_ref().unwrap().text_concat(),
+            "Hello"
+        );
+        assert!(last.is_final_response());
+        // Only the aggregated final event lands in the session.
+        let sess = ctx.session.lock();
+        assert_eq!(sess.events.len(), 1);
+        assert_eq!(
+            sess.events[0]
+                .response
+                .content
+                .as_ref()
+                .unwrap()
+                .text_concat(),
+            "Hello"
+        );
+    }
+
+    fn transfer_call(target: &str) -> LlmResponse {
+        use crate::genai_types::{FunctionCall, Role};
+        LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::FunctionCall(
+                    FunctionCall::new(
+                        "transfer_to_agent",
+                        serde_json::json!({"agent_name": target}),
+                    )
+                    .with_id("fc-t"),
+                )],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Declaring a sub-agent auto-registers the transfer tool and
+    /// advertises the sub-agent to the model; `disable_transfer` suppresses
+    /// both.
+    #[tokio::test]
+    async fn sub_agents_auto_register_transfer_tool() {
+        let sub_model = Arc::new(MockModel::new("mock-sub"));
+        let sub = Arc::new(
+            LlmAgent::builder("specialist")
+                .description("Handles specialist questions.")
+                .model(sub_model as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_text("I can handle this myself.");
+        let agent = Arc::new(
+            LlmAgent::builder("root")
+                .model(model.clone() as Arc<dyn Model>)
+                .sub_agent(sub.clone())
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let mut stream = agent.run(build_ctx(svc, "hi")).await.unwrap();
+        while let Some(e) = stream.next().await {
+            e.unwrap();
+        }
+        let req = &model.captured_requests()[0];
+        let tool_names: Vec<&str> = req
+            .config
+            .tools
+            .iter()
+            .filter_map(|t| match t {
+                crate::genai_types::Tool::FunctionDeclarations(d) => Some(d),
+                _ => None,
+            })
+            .flatten()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert!(tool_names.contains(&"transfer_to_agent"), "{tool_names:?}");
+        let sys = req
+            .config
+            .system_instruction
+            .as_ref()
+            .unwrap()
+            .text_concat();
+        assert!(sys.contains("specialist"), "{sys}");
+        assert!(sys.contains("Handles specialist questions."), "{sys}");
+
+        // disable_transfer suppresses both.
+        let model2 = Arc::new(MockModel::new("mock-1"));
+        model2.push_text("ok");
+        let agent = Arc::new(
+            LlmAgent::builder("root")
+                .model(model2.clone() as Arc<dyn Model>)
+                .sub_agent(sub)
+                .disable_transfer(true)
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let mut stream = agent.run(build_ctx(svc, "hi")).await.unwrap();
+        while let Some(e) = stream.next().await {
+            e.unwrap();
+        }
+        let req = &model2.captured_requests()[0];
+        assert!(req.tools_dict.is_empty());
+        assert!(req.config.system_instruction.is_none());
+    }
+
+    /// A `transfer_to_agent` call routes control to the named sub-agent,
+    /// whose events come through the parent's stream.
+    #[tokio::test]
+    async fn transfer_routes_to_sub_agent() {
+        let sub_model = Arc::new(MockModel::new("mock-sub"));
+        sub_model.push_text("specialist answer");
+        let sub = Arc::new(
+            LlmAgent::builder("specialist")
+                .description("expert")
+                .model(sub_model as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_response(transfer_call("specialist"));
+        let agent = Arc::new(
+            LlmAgent::builder("root")
+                .model(model.clone() as Arc<dyn Model>)
+                .sub_agent(sub)
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let mut stream = agent.run(build_ctx(svc, "hard question")).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        // The tool-response event records the transfer in its actions.
+        let tool_event = events
+            .iter()
+            .find(|e| !e.function_responses().is_empty())
+            .unwrap();
+        assert_eq!(
+            tool_event.actions.transfer_to_agent.as_deref(),
+            Some("specialist")
+        );
+        // The sub-agent's final answer arrived through the parent stream.
+        let last = events.last().unwrap();
+        assert_eq!(last.author, "specialist");
+        assert_eq!(
+            last.response.content.as_ref().unwrap().text_concat(),
+            "specialist answer"
+        );
+    }
+
+    /// Transfer to a *sibling* resolves through the invocation's root agent.
+    #[tokio::test]
+    async fn transfer_reaches_sibling_through_root() {
+        let a_model = Arc::new(MockModel::new("mock-a"));
+        a_model.push_response(transfer_call("agent_b"));
+        let agent_a = Arc::new(
+            LlmAgent::builder("agent_a")
+                .model(a_model as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let b_model = Arc::new(MockModel::new("mock-b"));
+        b_model.push_text("b answers");
+        let agent_b = Arc::new(
+            LlmAgent::builder("agent_b")
+                .model(b_model as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let root_model = Arc::new(MockModel::new("mock-root"));
+        let root = Arc::new(
+            LlmAgent::builder("root")
+                .model(root_model as Arc<dyn Model>)
+                .sub_agent(agent_a.clone())
+                .sub_agent(agent_b)
+                .build()
+                .unwrap(),
+        );
+
+        // Run agent_a directly, with the tree root in the context — agent_b
+        // is a sibling, not in agent_a's subtree.
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = Arc::new(InvocationContext {
+            root_agent: Some(root as Arc<dyn BaseAgent>),
+            ..(*build_ctx(svc, "q")).clone()
+        });
+        // agent_a has no sub-agents, so register the transfer tool manually
+        // (as its model still asks to transfer).
+        let agent_a = Arc::new(
+            LlmAgent::builder("agent_a")
+                .model(agent_a.model().clone())
+                .tool(crate::tools::transfer_to_agent_tool())
+                .build()
+                .unwrap(),
+        );
+        let mut stream = agent_a.run(ctx).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        let last = events.last().unwrap();
+        assert_eq!(last.author, "agent_b");
+        assert_eq!(
+            last.response.content.as_ref().unwrap().text_concat(),
+            "b answers"
+        );
+    }
+
+    /// A hallucinated transfer target must not kill the run: the model gets
+    /// an error response and can recover.
+    #[tokio::test]
+    async fn hallucinated_transfer_target_is_recoverable() {
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_response(transfer_call("does_not_exist"));
+        model.push_text("recovered without transfer");
+        let sub_model = Arc::new(MockModel::new("mock-sub"));
+        let sub = Arc::new(
+            LlmAgent::builder("specialist")
+                .model(sub_model as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let agent = Arc::new(
+            LlmAgent::builder("root")
+                .model(model.clone() as Arc<dyn Model>)
+                .sub_agent(sub)
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let mut stream = agent.run(build_ctx(svc, "q")).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        // The tool response surfaced an error to the model…
+        let tool_event = events
+            .iter()
+            .find(|e| !e.function_responses().is_empty())
+            .unwrap();
+        let fr = &tool_event.function_responses()[0];
+        assert!(
+            fr.response["error"]
+                .as_str()
+                .unwrap()
+                .contains("does_not_exist")
+        );
+        assert!(tool_event.actions.transfer_to_agent.is_none());
+        // …and the run completed normally with a second model turn.
+        let last = events.last().unwrap();
+        assert_eq!(
+            last.response.content.as_ref().unwrap().text_concat(),
+            "recovered without transfer"
+        );
+    }
+
+    /// Streamed thought deltas concatenate and adopt the trailing
+    /// signature-carrier chunk, so the aggregated part replays verbatim.
+    #[test]
+    fn merge_stream_chunk_attaches_thought_signature() {
+        use crate::genai_types::{Role, Thought};
+        let mut agg = LlmResponse::default();
+        let thought_chunk = |t: Thought| LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::Thought(t)],
+            }),
+            ..Default::default()
+        };
+        merge_stream_chunk(&mut agg, thought_chunk(Thought::new("Let me ")));
+        merge_stream_chunk(&mut agg, thought_chunk(Thought::new("think")));
+        merge_stream_chunk(
+            &mut agg,
+            thought_chunk(Thought {
+                text: String::new(),
+                signature: Some("sig-1".into()),
+            }),
+        );
+        let parts = agg.content.unwrap().parts;
+        assert_eq!(
+            parts,
+            vec![Part::Thought(
+                Thought::new("Let me think").with_signature("sig-1")
+            )]
+        );
+    }
+
+    /// Regression: state written by a tool through `ToolContext.state_delta`
+    /// must land on the tool-response event's actions (and from there be
+    /// persisted by the runner) instead of being silently discarded.
+    #[tokio::test]
+    async fn tool_state_delta_lands_on_tool_response_event() {
+        use crate::genai_types::{FunctionCall, Role};
+        use crate::tools::FunctionTool;
+
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_response(LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::FunctionCall(
+                    FunctionCall::new("writer", serde_json::json!({})).with_id("fc-1"),
+                )],
+            }),
+            ..Default::default()
+        });
+        model.push_text("done");
+
+        let tool = FunctionTool::from_async("writer", "writes state", None, |_args, ctx| {
+            ctx.state_delta
+                .insert("written_by_tool".into(), serde_json::json!(42));
+            ctx.skip_summarization = false;
+            async move { Ok(serde_json::json!({"ok": true})) }
+        });
+        let agent = Arc::new(
+            LlmAgent::builder("stateful")
+                .model(model.clone() as Arc<dyn Model>)
+                .tool(Arc::new(tool))
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = build_ctx(svc, "go");
+        let mut stream = agent.run(ctx).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        let tool_event = events
+            .iter()
+            .find(|e| !e.function_responses().is_empty())
+            .expect("tool-response event");
+        assert_eq!(
+            tool_event.actions.state_delta.get("written_by_tool"),
+            Some(&serde_json::json!(42))
+        );
+    }
+
+    /// A tool that sets `skip_summarization` ends the turn with the tool
+    /// response as the final event — the model is not called again.
+    #[tokio::test]
+    async fn skip_summarization_ends_turn_after_tool_response() {
+        use crate::genai_types::{FunctionCall, Role};
+        use crate::tools::FunctionTool;
+
+        let model = Arc::new(MockModel::new("mock-1"));
+        model.push_response(LlmResponse {
+            content: Some(Content {
+                role: Role::Model,
+                parts: vec![Part::FunctionCall(
+                    FunctionCall::new("final_answer", serde_json::json!({})).with_id("fc-1"),
+                )],
+            }),
+            ..Default::default()
+        });
+        // No second response queued: a second LLM call would error.
+
+        let tool = FunctionTool::from_async("final_answer", "answers", None, |_args, ctx| {
+            ctx.skip_summarization = true;
+            async move { Ok(serde_json::json!("the answer")) }
+        });
+        let agent = Arc::new(
+            LlmAgent::builder("skipper")
+                .model(model.clone() as Arc<dyn Model>)
+                .tool(Arc::new(tool))
+                .build()
+                .unwrap(),
+        );
+        let svc: Arc<dyn crate::core::SessionService> = Arc::new(InMemorySessionService::new());
+        let ctx = build_ctx(svc, "go");
+        let mut stream = agent.run(ctx).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(e) = stream.next().await {
+            events.push(e.unwrap());
+        }
+        let last = events.last().unwrap();
+        assert_eq!(last.actions.skip_summarization, Some(true));
+        assert!(last.is_final_response());
+        assert_eq!(model.captured_requests().len(), 1);
     }
 
     /// Regression for P1#1: a model response carrying a `FunctionCall` with

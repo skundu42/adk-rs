@@ -34,7 +34,7 @@ export const page: DocPage = {
       entries: [
         {
           sig: 'transfer_to_agent_tool() -> Arc<dyn DynTool>',
-          desc: 'Declares one required string arg, `agent_name`. Its `run` sets `ToolContext::transfer_to_agent`; the agent then locates the named agent in the tree and streams the rest of the invocation from it. See [multi-agent](/docs/multi-agent).',
+          desc: 'Declares one required string arg, `agent_name`. Its `run` sets `ToolContext::transfer_to_agent`; the agent then locates the named agent in the tree and streams the rest of the invocation from it. Auto-registered when an `LlmAgent` declares `sub_agents` (unless `disable_transfer`) — manual attachment is only needed for transfer without declared sub-agents. An unknown `agent_name` yields a recoverable `{"error": ...}` response rather than failing the run. See [multi-agent](/docs/multi-agent).',
         },
         {
           sig: 'exit_loop() -> Arc<dyn DynTool>',

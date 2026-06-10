@@ -9,24 +9,24 @@ export const page: DocPage = {
   blocks: [
     {
       kind: 'lede',
-      text: 'The `eval` feature replays recorded conversations — eval sets — against any [`BaseAgent`](/docs/agents-overview) and scores the results. Eval sets are plain, portable JSON files: record a conversation once and replay it against any agent build.',
+      text: 'The `eval` feature replays recorded conversations — eval sets — against any [`BaseAgent`](/docs/agents-overview) and scores the results. Eval sets are plain, portable JSON files, wire-compatible with Python ADK\'s `adk eval` output: files written by the Python tooling load unmodified, including FunctionCall-shaped `tool_uses` with extra fields. Record a conversation once and replay it against any agent build.',
     },
     { kind: 'h2', text: 'Eval-set format' },
     {
       kind: 'p',
-      text: 'An `EvalSet` is a list of `EvalCase`s; each case is a `conversation` of `Invocation`s — one user prompt, the expected final response, and the expected intermediate data (tool calls and intermediate model turns). All shapes derive plain serde, so a file is just JSON:',
+      text: 'An `EvalSet` is a list of `EvalCase`s; each case is a `conversation` of `Invocation`s — one user prompt, the expected final response, and the expected intermediate data (tool calls and intermediate model turns). All shapes derive plain serde, so a file is just JSON. Ids hit the wire under their Python ADK names — `eval_set_id` and `eval_id` — with the older adk-rs `id` key accepted on read as a legacy alias:',
     },
     {
       kind: 'code',
       lang: 'json',
       title: 'hello_world.evalset.json',
       code: `{
-  "id": "hello-world-set",
+  "eval_set_id": "hello-world-set",
   "name": "Hello world",
   "creation_timestamp": 0.0,
   "eval_cases": [
     {
-      "id": "case-1",
+      "eval_id": "case-1",
       "name": "greeting with a tool call",
       "session_input": null,
       "conversation": [
@@ -56,17 +56,18 @@ export const page: DocPage = {
       kind: 'table',
       head: ['Type', 'Fields'],
       rows: [
-        ['`EvalSet`', '`id`, `name` (default empty), `eval_cases`, `creation_timestamp` (seconds, default 0).'],
-        ['`EvalCase`', '`id`, `conversation: Vec<Invocation>`, `session_input: Option<Value>`, `name: Option<String>`.'],
-        ['`Invocation`', '`user_content: Content`, `final_response: Content`, `intermediate_data` (default empty), `invocation_id` (default empty).'],
-        ['`IntermediateData`', '`tool_uses: Vec<ToolUse>`, `intermediate_responses: Vec<Content>`.'],
-        ['`ToolUse`', '`name`, `args` (JSON value).'],
+        ['`EvalSet`', '`id` (serializes as `eval_set_id`), `name` (default empty), `description: Option<String>`, `eval_cases`, `creation_timestamp` (seconds, default 0).'],
+        ['`EvalCase`', '`id` (serializes as `eval_id`), `conversation: Vec<Invocation>`, `session_input: Option<SessionInput>`, `name: Option<String>`, `creation_timestamp`.'],
+        ['`Invocation`', '`user_content: Content`, `final_response: Option<Content>`, `intermediate_data` (default empty), `invocation_id` (default empty), `creation_timestamp`.'],
+        ['`IntermediateData`', '`tool_uses: Vec<ToolUse>`, `intermediate_responses: Vec<(String, Vec<Part>)>` — `(author, parts)` pairs, byte-compatible with Python.'],
+        ['`SessionInput`', '`app_name`, `user_id`, `state` (initial session state map).'],
+        ['`ToolUse`', '`name`, `args` (JSON value). Python stores full `FunctionCall` objects here; extra fields (e.g. `id`) are ignored on read.'],
       ],
     },
     {
       kind: 'callout',
       tone: 'note',
-      text: '`session_input` is parsed and carried on the type, but the current `EvalRunner` creates each case’s session with empty state and does not apply it.',
+      text: '`session_input.state` seeds the case’s session: the `EvalRunner` creates each case’s session with that fixture state before replaying the conversation. The `app_name` / `user_id` fields are carried for Python compatibility — the runner uses the names from its own constructor.',
     },
     { kind: 'h2', text: 'Loading' },
     {
@@ -100,7 +101,7 @@ export const page: DocPage = {
     },
     {
       kind: 'p',
-      text: 'For each invocation the runner drives the agent directly (no `Runner`), collects every `FunctionCall` part into actual `tool_uses`, records non-final content as `intermediate_responses`, and takes the event where `is_final_response()` holds as the actual `final_response`. Each evaluator then scores expected vs. actual; any non-`Passed` score flips the case’s `overall_status` to `FAILED`.',
+      text: 'For each invocation the runner drives the agent directly (no `Runner`), collects every `FunctionCall` part into actual `tool_uses`, records non-final content as `(author, parts)` pairs in `intermediate_responses`, and takes the event where `is_final_response()` holds as the actual `final_response`. Each evaluator scores every invocation; the reported per-evaluator `score` is the average across the case’s invocations, with the per-invocation scores riding in `details.per_invocation`. A metric’s `status` is the AND of its per-invocation statuses (`Error` dominating), and any non-`PASSED` metric flips the case’s `overall_status` to `FAILED`.',
     },
     { kind: 'h2', text: 'Metrics' },
     {
@@ -119,13 +120,13 @@ export const page: DocPage = {
         [
           '`ResponseMatch::new(threshold)`',
           '`final_response_match_v1`',
-          'Case-insensitive unigram overlap: the fraction of expected tokens that appear in the actual response text. A deliberately rough, Rouge-like metric (not a true Rouge-L); an empty expected response scores 1.0.',
+          'Case-insensitive, whole-token unigram overlap: the fraction of expected tokens that appear as whole tokens in the actual response text — an expected token `cat` does not match inside `concatenate`. A deliberately rough, Rouge-like metric (not a true Rouge-L); an empty expected response scores 1.0. Default threshold 0.8.',
         ],
       ],
     },
     {
       kind: 'p',
-      text: 'Scores are `EvalScore { score: f64, status: EvalStatus, details: Value }` with `status` derived from `score >= threshold`. `EvalStatus` serializes uppercase: `PASSED`, `FAILED`, or `ERROR`. An `EvalResult` carries `eval_set_id`, `eval_case_id`, the per-evaluator `scores` map, and `overall_status` (the logical AND of every metric across every invocation in the case).',
+      text: 'Scores are `EvalScore { score: f64, status: EvalStatus, details: Value }` with `status` derived from `score >= threshold`. `EvalStatus` serializes uppercase: `PASSED`, `FAILED`, or `ERROR`. An `EvalResult` carries `eval_set_id`, `eval_case_id`, the per-evaluator `scores` map (each score the invocation average described above), and `overall_status` (the logical AND of every metric across every invocation in the case).',
     },
     { kind: 'h2', text: 'Running evals' },
     {

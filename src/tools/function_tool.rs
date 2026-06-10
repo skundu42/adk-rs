@@ -148,7 +148,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::core::{InvocationContext, InvocationOrigin, RunConfig};
     use adk_services_mem_for_tests::dummy_invocation;
     use serde_json::json;
 
@@ -172,70 +171,12 @@ mod tests {
     }
 
     // Helper: produce a dummy invocation context without spinning up real
-    // services. Lives in a private inline module so it does not leak.
+    // services.
     mod adk_services_mem_for_tests {
-        use super::*;
+        use crate::core::InvocationContext;
 
         pub(super) fn dummy_invocation() -> InvocationContext {
-            use parking_lot::Mutex;
-            use std::collections::HashMap;
-            use std::sync::Arc;
-
-            #[derive(Debug)]
-            struct NoopSession;
-            #[async_trait]
-            impl crate::core::SessionService for NoopSession {
-                async fn create_session(
-                    &self,
-                    app: &str,
-                    user: &str,
-                    _state: Option<crate::core::State>,
-                    id: Option<&str>,
-                ) -> crate::error::Result<crate::core::Session> {
-                    Ok(crate::core::Session::new(app, user, id.unwrap_or("s")))
-                }
-                async fn get_session(
-                    &self,
-                    _: &str,
-                    _: &str,
-                    _: &str,
-                    _: crate::core::GetSessionConfig,
-                ) -> crate::error::Result<Option<crate::core::Session>> {
-                    Ok(None)
-                }
-                async fn list_sessions(
-                    &self,
-                    _: &str,
-                    _: &str,
-                ) -> crate::error::Result<crate::core::ListSessionsResponse> {
-                    Ok(crate::core::ListSessionsResponse::default())
-                }
-                async fn delete_session(
-                    &self,
-                    _: &str,
-                    _: &str,
-                    _: &str,
-                ) -> crate::error::Result<()> {
-                    Ok(())
-                }
-            }
-
-            InvocationContext {
-                app_name: "app".into(),
-                user_id: "u".into(),
-                invocation_id: "inv-1".into(),
-                session: Arc::new(Mutex::new(crate::core::Session::new("app", "u", "s"))),
-                session_service: Arc::new(NoopSession),
-                artifact_service: None,
-                memory_service: None,
-                credential_service: None,
-                run_config: RunConfig::default(),
-                origin: InvocationOrigin::Api,
-                user_content: None,
-                llm_call_count: Arc::new(Mutex::new(0)),
-                cancellation: Default::default(),
-                attributes: Arc::new(Mutex::new(HashMap::new())),
-            }
+            crate::core::testing::test_invocation_context()
         }
     }
 }

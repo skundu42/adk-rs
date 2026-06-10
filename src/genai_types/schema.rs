@@ -213,14 +213,25 @@ impl Schema {
                 serde_json::to_value(v).map_err(|e| SchemaError::Invalid(e.to_string()))?,
             );
         }
-        from_json_schema(&root_obj, &definitions)
+        from_json_schema(&root_obj, &definitions, 0)
     }
 }
+
+/// Recursion ceiling for schema conversion: a self-referential type (e.g. a
+/// tree node whose schema `$ref`s itself) would otherwise recurse without
+/// bound and abort the process with a stack overflow.
+const MAX_SCHEMA_DEPTH: usize = 64;
 
 fn from_json_schema(
     v: &serde_json::Value,
     defs: &BTreeMap<String, serde_json::Value>,
+    depth: usize,
 ) -> Result<Schema, SchemaError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(SchemaError::Invalid(
+            "schema exceeds maximum nesting depth (recursive type?)".into(),
+        ));
+    }
     let obj = v
         .as_object()
         .ok_or_else(|| SchemaError::Invalid("expected object".into()))?;
@@ -234,7 +245,7 @@ fn from_json_schema(
         let target = defs
             .get(name)
             .ok_or_else(|| SchemaError::Invalid(format!("dangling $ref: {r}")))?;
-        return from_json_schema(target, defs);
+        return from_json_schema(target, defs, depth + 1);
     }
 
     let mut out = Schema::default();
@@ -265,11 +276,12 @@ fn from_json_schema(
         );
     }
     if let Some(it) = obj.get("items") {
-        out.items = Some(Box::new(from_json_schema(it, defs)?));
+        out.items = Some(Box::new(from_json_schema(it, defs, depth + 1)?));
     }
     if let Some(props) = obj.get("properties").and_then(|x| x.as_object()) {
         for (k, v) in props {
-            out.properties.insert(k.clone(), from_json_schema(v, defs)?);
+            out.properties
+                .insert(k.clone(), from_json_schema(v, defs, depth + 1)?);
         }
     }
     if let Some(req) = obj.get("required").and_then(|x| x.as_array()) {
@@ -380,6 +392,25 @@ mod tests {
         let mut s = Schema::integer();
         s.enum_values = Some(vec!["1".into(), "2".into()]);
         assert!(s.sanitize_for_gemini().is_err());
+    }
+
+    /// Regression: a recursive type's schema (`Node.children: Vec<Node>`)
+    /// must produce an `Err`, not a stack overflow.
+    #[test]
+    fn from_schemars_rejects_recursive_types() {
+        use schemars::JsonSchema;
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct Node {
+            value: i32,
+            children: Vec<Node>,
+        }
+        let root = schemars::schema_for!(Node);
+        let err = Schema::from_schemars(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "expected depth error, got: {err}"
+        );
     }
 
     #[test]

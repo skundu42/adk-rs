@@ -26,6 +26,11 @@ export const page: DocPage = {
         'The doc comment on the function becomes the tool’s `description()` (lines are joined with newlines).',
       ],
     },
+    {
+      kind: 'callout',
+      tone: 'note',
+      text: 'The expansion routes everything through `::adk_rs::__private` re-exports of `async_trait`, `schemars`, and `serde_json`, so downstream crates only need `adk-rs` in `Cargo.toml` for the generated code to compile. You still add `serde` and `schemars` yourself for the `Deserialize`/`JsonSchema` derives on your args struct.',
+    },
     { kind: 'h3', text: 'What it generates' },
     {
       kind: 'p',
@@ -79,6 +84,11 @@ let agent = LlmAgent::builder("weather")
       kind: 'callout',
       tone: 'tip',
       text: 'Bad arguments never reach your function body. If the model sends `{"msg": 42}` where a string is expected, `run` fails with `ToolError::InvalidArgs { tool, message }` and the error text is fed back to the model, which usually self-corrects on the next iteration.',
+    },
+    {
+      kind: 'callout',
+      tone: 'warn',
+      text: 'Avoid recursive arg types (a struct whose schema references itself). Schema conversion errors out at nesting depth 64 instead of overflowing the stack — and in the macro’s `declaration()` that error silently degrades to an empty object schema, so the model would see a tool with no parameters.',
     },
     { kind: 'h2', text: 'FunctionTool: the explicit fallback' },
     {

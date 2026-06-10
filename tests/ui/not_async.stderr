@@ -1,0 +1,13 @@
+error: #[adk_rs::tool] requires an async fn
+  --> tests/ui/not_async.rs:11:1
+   |
+11 | fn nope(_args: Args, _ctx: &mut ToolContext) -> adk_rs::Result<i32> {
+   | ^^
+
+warning: unused import: `adk_rs::core::ToolContext`
+ --> tests/ui/not_async.rs:3:5
+  |
+3 | use adk_rs::core::ToolContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default

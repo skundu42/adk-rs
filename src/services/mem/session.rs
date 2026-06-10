@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use crate::core::{
     Event, GetSessionConfig, ListSessionsResponse, Session, SessionMeta, SessionService, State,
-    StateScope,
+    StateDelta, StateScope,
 };
 use crate::error::{Error, Result};
 
@@ -50,6 +50,39 @@ impl InMemorySessionService {
             .or_insert_with(|| Arc::new(Mutex::new(State::new())))
             .value()
             .clone()
+    }
+
+    /// Merge one appended event into the authoritative store slot.
+    ///
+    /// The merge *appends* the event and *applies* the session-scope state
+    /// delta instead of replacing the stored session with the caller's
+    /// snapshot: concurrent invocations hold independent snapshots of the
+    /// same session, and replacement would silently drop every event the
+    /// other writers appended (last writer wins over the whole log).
+    /// `seed` — the caller's snapshot, trimmed to session-scope state and
+    /// already containing `event` — only populates the slot when the
+    /// session is unknown to the store (constructed externally).
+    fn mirror_event(
+        &self,
+        key: (String, String, String),
+        seed: &Session,
+        event: &Event,
+        session_delta: &StateDelta,
+    ) {
+        let arc = self
+            .sessions
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(seed.clone())))
+            .value()
+            .clone();
+        let mut stored = arc.lock();
+        if !stored.events.iter().any(|e| e.id == event.id) {
+            stored.events.push(event.clone());
+        }
+        stored.state.apply(session_delta);
+        if seed.last_update_time > stored.last_update_time {
+            stored.last_update_time = seed.last_update_time;
+        }
     }
 
     /// Overlay app + user + session state into a flattened view. The session
@@ -187,19 +220,15 @@ impl SessionService for InMemorySessionService {
         // Mirror into our authoritative store — but only with session-scope
         // state so app/user keys aren't pinned per-session.
         let key = Self::key(&session.app_name, &session.user_id, &session.id);
-        let mut to_mirror = session.clone();
-        to_mirror.state = State::from_iter(
+        let mut seed = session.clone();
+        seed.state = State::from_iter(
             session
                 .state
                 .iter()
                 .filter(|(k, _)| StateScope::of(k) == StateScope::Session)
                 .map(|(k, v)| (k.clone(), v.clone())),
         );
-        if let Some(arc) = self.sessions.get(&key) {
-            *arc.lock() = to_mirror;
-        } else {
-            self.sessions.insert(key, Arc::new(Mutex::new(to_mirror)));
-        }
+        self.mirror_event(key, &seed, &event, &session_delta);
         Ok(event)
     }
 
@@ -217,7 +246,7 @@ impl SessionService for InMemorySessionService {
             return Ok(event);
         }
         // Compute scope split once, outside the live lock — pure data.
-        let (app_delta, user_delta, _session_delta, _temp_delta) =
+        let (app_delta, user_delta, session_delta, _temp_delta) =
             State::partition_by_scope(&event.actions.state_delta);
 
         // Critical section: apply delta + push event + snapshot for mirroring.
@@ -253,15 +282,8 @@ impl SessionService for InMemorySessionService {
                 .apply(&user_delta);
         }
 
-        // Mirror session-scope state into the internal slot.
-        // Take the user/app id pieces we need before the move.
-        let mirror_key = key;
-        if let Some(arc) = self.sessions.get(&mirror_key) {
-            *arc.lock() = session_only_snap.clone();
-        } else {
-            self.sessions
-                .insert(mirror_key, Arc::new(Mutex::new(session_only_snap.clone())));
-        }
+        // Mirror the event into the internal slot (append, never replace).
+        self.mirror_event(key, &session_only_snap, &event, &session_delta);
         Ok(event)
     }
 }
@@ -275,6 +297,62 @@ mod race_tests {
     /// against the same `Arc<Mutex<Session>>` must not lose events. Before
     /// the fix this test reliably dropped writes because of the `clone() ...
     /// await ... overwrite` anti-pattern in callers.
+    /// Regression: two *invocations* (the runner snapshots the session into
+    /// a fresh `Arc<Mutex<Session>>` per invocation) appending to the same
+    /// session id must not lose each other's events. The old mirror
+    /// replaced the stored session with each writer's whole snapshot, so
+    /// the last writer wiped everything the others appended.
+    #[tokio::test]
+    async fn concurrent_invocations_on_same_session_keep_all_events() {
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let s = svc
+            .create_session("app", "u", None, Some("sid"))
+            .await
+            .unwrap();
+
+        // Two independent snapshots, as two overlapping `runner.run` calls
+        // would hold.
+        let inv1 = Arc::new(Mutex::new(s.clone()));
+        let inv2 = Arc::new(Mutex::new(s.clone()));
+
+        let mut ev1 = Event::new("agent", LlmResponse::default());
+        ev1.actions
+            .state_delta
+            .insert("from_inv1".into(), serde_json::json!(1));
+        let mut ev2 = Event::new("agent", LlmResponse::default());
+        ev2.actions
+            .state_delta
+            .insert("from_inv2".into(), serde_json::json!(2));
+
+        // Interleave: inv1 writes, then inv2 (whose snapshot has never seen
+        // inv1's event) writes, then inv1 again.
+        let ev1 = svc.append_event_locked(&inv1, ev1).await.unwrap();
+        let ev2 = svc.append_event_locked(&inv2, ev2).await.unwrap();
+        let mut ev3 = Event::new("agent", LlmResponse::default());
+        ev3.actions
+            .state_delta
+            .insert("from_inv1_again".into(), serde_json::json!(3));
+        let ev3 = svc.append_event_locked(&inv1, ev3).await.unwrap();
+
+        let stored = svc
+            .get_session("app", "u", "sid", Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let ids: Vec<&str> = stored.events.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&ev1.id.as_str()), "lost inv1's first event");
+        assert!(ids.contains(&ev2.id.as_str()), "lost inv2's event");
+        assert!(ids.contains(&ev3.id.as_str()), "lost inv1's second event");
+        assert_eq!(stored.events.len(), 3);
+        // State deltas from every writer survive too.
+        assert_eq!(stored.state.get("from_inv1"), Some(&serde_json::json!(1)));
+        assert_eq!(stored.state.get("from_inv2"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            stored.state.get("from_inv1_again"),
+            Some(&serde_json::json!(3))
+        );
+    }
+
     /// Regression for P1#3: a write to `app:foo` from one session must be
     /// visible to a *different* session for the same app (cross-session
     /// scope). Before the fix this kept the value pinned to the writing

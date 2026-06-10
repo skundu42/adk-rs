@@ -9,7 +9,7 @@ export const page: DocPage = {
   blocks: [
     {
       kind: 'lede',
-      text: 'adk-rs has two hook surfaces. **Callbacks** are typed async closures aimed at specific lifecycle points — before/after the agent, the model, and each tool. **Plugins** are trait objects the [Runner](/docs/runner) calls around every invocation and for every event. In v0.3.0, plugins are the fully wired runtime surface.',
+      text: 'adk-rs has two hook surfaces, both fully wired. **Callbacks** are typed async closures aimed at specific lifecycle points — before/after the agent, the model, and each tool — registered on one agent via its builder. **Plugins** are trait objects the [Runner](/docs/runner) calls around every invocation and for every event, hooking the whole runner.',
     },
     { kind: 'h2', text: 'Callback contexts' },
     {
@@ -43,7 +43,7 @@ export const page: DocPage = {
         },
         {
           sig: 'type AfterAgentCallback = BeforeAgentCallback',
-          desc: 'Runs after an agent. Returning `Some(content)` replaces the agent’s emitted content.',
+          desc: 'Runs after an agent. Returning `Some(content)` appends one more event carrying that content after the agent’s final response.',
         },
         {
           sig: 'type BeforeModelCallback = Arc<dyn Fn(&mut CallbackContext, &mut LlmRequest) -> BoxFuture<Result<Option<LlmResponse>>> + Send + Sync>',
@@ -99,9 +99,9 @@ let guard: BeforeModelCallback = Arc::new(|_ctx: &mut CallbackContext, req| {
     },
     {
       kind: 'callout',
-      tone: 'warn',
-      title: 'Wiring status in v0.3.0',
-      text: 'The callback aliases and macro are exported from `adk_rs::core`, but `LlmAgentBuilder` does not yet expose registration methods for them — there is no `.before_model_callback(...)` on the builder. For runtime interception today, use **plugins** (below); for per-turn prompt shaping, use a dynamic instruction provider.',
+      tone: 'note',
+      title: 'Where callbacks fire',
+      text: 'Each hook is registered with the matching `LlmAgentBuilder` method (`.before_agent_callback(...)`, `.before_model_callback(...)`, and so on — see [LlmAgent](/docs/llm-agent)) and is wired into the run loop. `before_agent` returning `Some(content)` skips the run entirely and persists that content as the agent’s single event. `before_model` may rewrite the `LlmRequest` in place or return `Some(response)` to skip the model call; `on_model_error` can recover a failed call (otherwise the error propagates); `after_model` may replace the response. `before_tool` may rewrite the args or short-circuit the tool; `after_tool` may rewrite the result; `on_tool_error` recovers a failed tool call (otherwise the model sees `{"error": ...}`).',
     },
     { kind: 'h2', text: 'The BasePlugin trait' },
     {
@@ -201,7 +201,7 @@ let runner = Runner::builder()
       items: [
         '[Runner](/docs/runner) — where plugin hooks fire in the invocation lifecycle.',
         '[Events](/docs/events) — the payload `on_event` observes.',
-        '[LlmAgent](/docs/llm-agent) — dynamic instruction providers, the per-turn shaping hook that *is* wired today.',
+        '[LlmAgent](/docs/llm-agent) — the builder’s `*_callback` registration methods and dynamic instruction providers.',
         '[Telemetry](/docs/telemetry) — structured tracing to complement `LoggingPlugin`.',
       ],
     },

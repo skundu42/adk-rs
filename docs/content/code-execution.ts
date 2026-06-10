@@ -17,7 +17,7 @@ export const page: DocPage = {
       ordered: true,
       items: [
         'The model replies with one or more `ExecutableCode` parts (`language` + `code`) instead of a final answer.',
-        'The agent extracts them and calls `executor.execute_code(...)` for each, retrying up to `error_retry_attempts()` times on *executor* errors (spawn failures, I/O) — a non-zero exit code from the program itself is a result, not an error.',
+        'The agent extracts them and calls `executor.execute_code(...)` for each, making up to `error_retry_attempts()` **total attempts** on *executor* errors (spawn failures, I/O) — the default of 2 means one retry. A non-zero exit code from the program itself is a result, not an error.',
         'Each result becomes a `CodeExecutionResult` part with `outcome: OutcomeOk` when `result.is_success()` (exit code 0, or no exit code and empty stderr) and `OutcomeFailed` otherwise; the output is `stdout`, with stderr appended under a `--- stderr ---` divider when both exist.',
         'The code and its results are appended to the next turn\'s contents and the loop continues until the model answers without emitting code.',
       ],
@@ -36,7 +36,7 @@ export const page: DocPage = {
         },
         {
           sig: 'fn error_retry_attempts(&self) -> u32 — default 2',
-          desc: 'Maximum retries allowed per invocation before the failure surfaces as a failed `CodeExecutionResult`.',
+          desc: 'Total number of attempts per execution (minimum 1) before the failure surfaces as a failed `CodeExecutionResult` — the default of 2 means one retry.',
         },
         {
           sig: 'fn timeout(&self) -> Option<Duration> — default Some(30s)',
@@ -69,18 +69,18 @@ export const page: DocPage = {
     { kind: 'h2', text: 'LocalCodeExecutor' },
     {
       kind: 'p',
-      text: 'Spawns a child interpreter via `tokio::process`, writing the code to stdin. Defaults: `python3` with args `["-"]`, a 30-second timeout, 2 retries. On timeout the child is killed and the result carries `exit_code: None` with a "timed out" stderr message.',
+      text: 'Spawns a child interpreter via `tokio::process`, writing the code to stdin. Defaults: `python3` with args `["-"]`, a 30-second timeout, 2 attempts (1 retry). On timeout the child is killed and the result carries `exit_code: None` with a "timed out" stderr message.',
     },
     {
       kind: 'callout',
       tone: 'warn',
       title: 'Not a security boundary',
-      text: 'The child process runs with the parent\'s user, network, and filesystem. `LocalCodeExecutor` is subprocess isolation only — use `ContainerCodeExecutor` (or a remote sandbox) for untrusted code. See [Security](/docs/security).',
+      text: 'The child process runs with the parent\'s user, network, and filesystem, and inherits the parent\'s environment variables (API keys included) — there is no env scrubbing. `LocalCodeExecutor` is subprocess isolation only — use `ContainerCodeExecutor` (or a remote sandbox) for untrusted code. See [Security](/docs/security).',
     },
     {
       kind: 'api',
       entries: [
-        { sig: 'LocalCodeExecutor::new() -> Self', desc: 'Defaults: `python3 -`, 30s timeout, 2 retries.' },
+        { sig: 'LocalCodeExecutor::new() -> Self', desc: 'Defaults: `python3 -`, 30s timeout, 2 attempts (1 retry).' },
         { sig: 'with_interpreter(self, interpreter: impl Into<String>) -> Self', desc: 'Swap the binary (`"node"`, `"bash"`, ...).' },
         { sig: 'with_args(self, args: Vec<String>) -> Self', desc: 'Override interpreter args. Keep `-` (or your interpreter\'s stdin flag) so the child reads source from stdin.' },
         { sig: 'with_timeout(self, t: Duration) -> Self', desc: 'Override the per-call wall-clock timeout.' },

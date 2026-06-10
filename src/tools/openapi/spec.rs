@@ -174,7 +174,7 @@ fn parameter_data_to_api_param(
     location: ParamLocation,
 ) -> Result<ApiParameter> {
     let schema = match &data.format {
-        ParameterSchemaOrContent::Schema(s) => schema_or_ref_to_schema(api, s)?,
+        ParameterSchemaOrContent::Schema(s) => schema_or_ref_to_schema(api, s, 0)?,
         ParameterSchemaOrContent::Content(_) => Schema::string(),
     };
     Ok(ApiParameter {
@@ -205,7 +205,7 @@ fn request_body_to_params(
     let Some(schema) = media.schema.as_ref() else {
         return Ok(vec![]);
     };
-    let schema = schema_or_ref_to_schema(api, schema)?;
+    let schema = schema_or_ref_to_schema(api, schema, 0)?;
     Ok(vec![ApiParameter {
         name: "body".into(),
         py_name: "body".into(),
@@ -216,16 +216,31 @@ fn request_body_to_params(
     }])
 }
 
-fn schema_or_ref_to_schema(api: &OpenAPI, s: &ReferenceOr<openapiv3::Schema>) -> Result<Schema> {
+/// Recursion ceiling for schema conversion. Circular `$ref`s (e.g.
+/// `Category.parent: $ref Category`, common in real-world specs) would
+/// otherwise recurse without bound and abort the process with a stack
+/// overflow; legitimate specs stay far below this depth.
+const MAX_SCHEMA_DEPTH: usize = 64;
+
+fn schema_or_ref_to_schema(
+    api: &OpenAPI,
+    s: &ReferenceOr<openapiv3::Schema>,
+    depth: usize,
+) -> Result<Schema> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(Error::config(
+            "OpenAPI schema exceeds maximum nesting depth (circular $ref?)",
+        ));
+    }
     match s {
-        ReferenceOr::Item(s) => openapi_schema_to_adk_schema(api, s),
+        ReferenceOr::Item(s) => openapi_schema_to_adk_schema(api, s, depth),
         ReferenceOr::Reference { reference } => {
             let Some(target) = resolve_schema_ref(api, reference) else {
                 return Err(Error::config(format!(
                     "unsupported or unresolved OpenAPI schema ref `{reference}`"
                 )));
             };
-            schema_or_ref_to_schema(api, target)
+            schema_or_ref_to_schema(api, target, depth + 1)
         }
     }
 }
@@ -238,7 +253,11 @@ fn resolve_schema_ref<'a>(
     api.components.as_ref()?.schemas.get(name)
 }
 
-fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<Schema> {
+fn openapi_schema_to_adk_schema(
+    api: &OpenAPI,
+    s: &openapiv3::Schema,
+    depth: usize,
+) -> Result<Schema> {
     use openapiv3::Type;
     let mut schema = match &s.schema_kind {
         SchemaKind::Type(t) => match t {
@@ -295,7 +314,7 @@ fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<
                 let item = arr
                     .items
                     .as_ref()
-                    .map(|i| schema_or_ref_to_schema(api, &i.clone().unbox()))
+                    .map(|i| schema_or_ref_to_schema(api, &i.clone().unbox(), depth + 1))
                     .transpose()?
                     .unwrap_or_else(Schema::string);
                 let mut out = Schema::array(item);
@@ -310,8 +329,10 @@ fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<
             Type::Object(obj) => {
                 let mut out = Schema::object();
                 for (k, v) in &obj.properties {
-                    out =
-                        out.property(k.clone(), schema_or_ref_to_schema(api, &v.clone().unbox())?);
+                    out = out.property(
+                        k.clone(),
+                        schema_or_ref_to_schema(api, &v.clone().unbox(), depth + 1)?,
+                    );
                 }
                 for r in &obj.required {
                     out = out.require(r.clone());
@@ -319,9 +340,9 @@ fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<
                 out
             }
         },
-        SchemaKind::AllOf { all_of } => merge_all_of(api, all_of)?,
+        SchemaKind::AllOf { all_of } => merge_all_of(api, all_of, depth + 1)?,
         SchemaKind::OneOf { one_of } | SchemaKind::AnyOf { any_of: one_of } => {
-            flatten_one_of(api, one_of)?
+            flatten_one_of(api, one_of, depth + 1)?
         }
         SchemaKind::Not { .. } => Schema::string(), // best-effort
         SchemaKind::Any(_) => Schema::object(),     // free-form
@@ -354,10 +375,14 @@ fn openapi_schema_to_adk_schema(api: &OpenAPI, s: &openapiv3::Schema) -> Result<
 /// union; conflicting scalar types degrade to the first one. Common pattern:
 /// `allOf: [$ref to BaseModel, { type: object, properties: {...} }]` →
 /// flattened single object schema.
-fn merge_all_of(api: &OpenAPI, list: &[ReferenceOr<openapiv3::Schema>]) -> Result<Schema> {
+fn merge_all_of(
+    api: &OpenAPI,
+    list: &[ReferenceOr<openapiv3::Schema>],
+    depth: usize,
+) -> Result<Schema> {
     let mut out = Schema::object();
     for s in list {
-        let part = schema_or_ref_to_schema(api, s)?;
+        let part = schema_or_ref_to_schema(api, s, depth)?;
         // If this part is an object, merge its properties + required.
         if part.r#type == Some(crate::genai_types::SchemaType::Object) {
             for (k, v) in part.properties {
@@ -391,10 +416,14 @@ fn merge_all_of(api: &OpenAPI, list: &[ReferenceOr<openapiv3::Schema>]) -> Resul
 /// sub-schema; falls back to a free-form object. `oneOf` and `anyOf` are
 /// indistinguishable for our purposes since the LLM can't pick which arm to
 /// satisfy — we settle on the most permissive shape we can express.
-fn flatten_one_of(api: &OpenAPI, list: &[ReferenceOr<openapiv3::Schema>]) -> Result<Schema> {
+fn flatten_one_of(
+    api: &OpenAPI,
+    list: &[ReferenceOr<openapiv3::Schema>],
+    depth: usize,
+) -> Result<Schema> {
     let parts: Vec<Schema> = list
         .iter()
-        .map(|s| schema_or_ref_to_schema(api, s))
+        .map(|s| schema_or_ref_to_schema(api, s, depth))
         .collect::<Result<_>>()?;
     if let Some(obj) = parts
         .iter()
@@ -573,6 +602,50 @@ components:
       type: http
       scheme: bearer
 "#;
+
+    /// Regression: a self-referential schema (`Category.parent → Category`,
+    /// common in real specs) must produce an `Err`, not a stack overflow.
+    #[test]
+    fn circular_schema_ref_errors_instead_of_overflowing() {
+        let spec = r#"
+openapi: 3.0.0
+info:
+  title: Circular
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+paths:
+  /categories:
+    post:
+      operationId: createCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Category'
+      responses:
+        '201':
+          description: created
+components:
+  schemas:
+    Category:
+      type: object
+      properties:
+        name:
+          type: string
+        parent:
+          $ref: '#/components/schemas/Category'
+"#;
+        let err = match parse_spec(spec) {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse failure for circular $ref"),
+        };
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "expected depth error, got: {err}"
+        );
+    }
 
     #[test]
     fn parses_paths_and_operations() {

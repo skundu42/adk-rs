@@ -56,7 +56,7 @@ pub trait BaseAgent: Send + Sync + std::fmt::Debug + 'static {
         },
         {
           sig: 'fn find_agent(&self, name: &str) -> Option<Arc<dyn BaseAgent>>',
-          desc: 'Resolves a descendant by name, depth-first. The default implementation recurses through `sub_agents()`; `LlmAgent` uses it to route `transfer_to_agent` calls.',
+          desc: 'Resolves a descendant by name, depth-first. The default implementation recurses through `sub_agents()`; `LlmAgent` uses it to route `transfer_to_agent` calls — searching its own subtree first, then the whole tree from `InvocationContext.root_agent`, so siblings and ancestors are reachable too.',
         },
         {
           sig: 'async fn run(self: Arc<Self>, ctx: Arc<InvocationContext>) -> Result<EventStream<\'static>>',
@@ -118,6 +118,10 @@ pub trait BaseAgent: Send + Sync + std::fmt::Debug + 'static {
         {
           sig: 'pub cancellation: CancellationToken',
           desc: 'Cooperative cancellation flag, flipped by `Runner::cancel` or the A2A `tasks/cancel` handler. See [Cancellation & resume](/docs/cancellation-and-resume).',
+        },
+        {
+          sig: 'pub root_agent: Option<Arc<dyn BaseAgent>>',
+          desc: 'Root of the agent tree, set by the runner. [Agent transfer](/docs/multi-agent) resolves targets from here, so siblings and ancestors are reachable. A breaking addition for code that builds the struct literally.',
         },
         {
           sig: 'pub fn is_cancelled(&self) -> bool',

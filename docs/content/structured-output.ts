@@ -101,7 +101,7 @@ let schema = Schema::from_schemars(&root)?;`,
     {
       kind: 'code',
       lang: 'rust',
-      title: 'examples/structured.rs',
+      title: 'Structured output end-to-end',
       code: `use adk_rs::agents::LlmAgent;
 use adk_rs::genai_types::Schema;
 use adk_rs::providers::gemini::Gemini;

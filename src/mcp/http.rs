@@ -95,8 +95,11 @@ impl HttpTransport {
                 .map_err(|e| Error::config(format!("invalid MCP header value: {e}")))?;
             headers.insert(name, value);
         }
+        // Redirects disabled: the extra headers can carry credentials and
+        // reqwest re-sends custom headers to redirect targets.
         let http = Client::builder()
             .timeout(params.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| Error::other(format!("MCP HTTP client: {e}")))?;
@@ -249,17 +252,7 @@ impl HttpTransport {
     }
 }
 
-/// Heuristic: would shipping this header to a plaintext endpoint leak a
-/// credential? Matches `Authorization`, `Cookie`, `Proxy-Authorization`,
-/// and the conventional `x-api-*` / `x-auth-*` patterns case-insensitively.
-fn header_looks_credential_bearing(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "authorization" | "cookie" | "proxy-authorization"
-    ) || lower.starts_with("x-api")
-        || lower.starts_with("x-auth")
-}
+use crate::transport_security::header_looks_credential_bearing;
 
 fn parse_match(bytes: &[u8], expected_id: u64) -> Result<Value> {
     let env: JsonRpcEnvelope = serde_json::from_slice(bytes)

@@ -24,12 +24,6 @@ pub enum Error {
     /// Error in schema generation, sanitization, or validation.
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    /// Invariant that should never fail at runtime did.
-    #[error("invariant violated: {0}")]
-    Invariant(&'static str),
-    /// The operation was cancelled.
-    #[error("operation cancelled")]
-    Cancelled,
     /// Invalid configuration supplied by the caller.
     #[error("invalid configuration: {0}")]
     Config(String),

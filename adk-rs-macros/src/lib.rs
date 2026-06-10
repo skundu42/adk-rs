@@ -159,17 +159,21 @@ fn tool_impl(f: ItemFn) -> syn::Result<TokenStream> {
 
     let constructor_name = name_ident.clone();
 
+    // Everything the expansion needs is reachable through
+    // `::adk_rs::__private` (including re-exports of async_trait, schemars,
+    // and serde_json) so downstream crates only need `adk-rs` in their
+    // Cargo.toml.
     let expanded = quote! {
         #[doc = #description]
         #[derive(Debug, Default, Clone, Copy)]
         #vis struct #struct_ident;
 
-        #[::async_trait::async_trait]
+        #[::adk_rs::__private::async_trait::async_trait]
         impl ::adk_rs::__private::DynTool for #struct_ident {
             fn name(&self) -> &str { #name_str }
             fn description(&self) -> &str { #description }
             fn declaration(&self) -> ::std::option::Option<::adk_rs::__private::FunctionDeclaration> {
-                let root = ::schemars::schema_for!(#arg_ty_owned);
+                let root = ::adk_rs::__private::schemars::schema_for!(#arg_ty_owned);
                 let schema = ::adk_rs::__private::Schema::from_schemars(&root)
                     .unwrap_or_else(|_| ::adk_rs::__private::Schema::object());
                 ::std::option::Option::Some(
@@ -179,18 +183,18 @@ fn tool_impl(f: ItemFn) -> syn::Result<TokenStream> {
             }
             async fn run(
                 &self,
-                args: ::serde_json::Value,
+                args: ::adk_rs::__private::serde_json::Value,
                 #ctx_ident: &mut ::adk_rs::__private::ToolContext,
-            ) -> ::adk_rs::__private::Result<::serde_json::Value> {
+            ) -> ::adk_rs::__private::Result<::adk_rs::__private::serde_json::Value> {
                 async fn __inner(#arg_ident: #arg_ty_owned, #ctx_ident: &mut ::adk_rs::__private::ToolContext) #ret_ty #body
-                let typed: #arg_ty_owned = ::serde_json::from_value(args).map_err(|e| {
+                let typed: #arg_ty_owned = ::adk_rs::__private::serde_json::from_value(args).map_err(|e| {
                     ::adk_rs::__private::Error::Tool(::adk_rs::__private::ToolError::InvalidArgs {
                         tool: #name_str.to_string(),
                         message: e.to_string(),
                     })
                 })?;
                 let r = __inner(typed, #ctx_ident).await?;
-                ::serde_json::to_value(r).map_err(|e| {
+                ::adk_rs::__private::serde_json::to_value(r).map_err(|e| {
                     ::adk_rs::__private::Error::Tool(::adk_rs::__private::ToolError::Execution {
                         tool: #name_str.to_string(),
                         message: e.to_string(),

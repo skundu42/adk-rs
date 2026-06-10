@@ -30,9 +30,10 @@ pub struct LlmRequest {
     /// not serializable; we round-trip the declarations via `config.tools`).
     #[serde(skip)]
     pub tools_dict: HashMap<String, Arc<dyn crate::core::tool_object::DynTool>>,
-    /// Explicit context-caching config for this call. Cache-capable
-    /// providers (Gemini) cache the stable prefix (system instruction +
-    /// tools) server-side; other providers ignore this.
+    /// Explicit context-caching config for this call. Gemini caches the
+    /// stable prefix (system instruction + tools) server-side via explicit
+    /// `cachedContents`; Anthropic maps it to a prompt-caching
+    /// `cache_control` breakpoint; other providers ignore this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_config: Option<crate::core::cache::ContextCacheConfig>,
 }

@@ -15,6 +15,17 @@ pub struct FunctionCall {
     /// JSON object of arguments (per the tool's schema).
     #[serde(default)]
     pub args: Value,
+    /// Thought signature attached by thinking models (Gemini); must be
+    /// echoed back verbatim with the call on later turns. On the wire it
+    /// rides at the *part* level as a sibling `thoughtSignature` key (see
+    /// [`crate::genai_types::Part`]'s serializer); this nested form is
+    /// accepted on read for robustness.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "thoughtSignature"
+    )]
+    pub thought_signature: Option<String>,
 }
 
 impl FunctionCall {
@@ -24,6 +35,7 @@ impl FunctionCall {
             id: None,
             name: name.into(),
             args,
+            thought_signature: None,
         }
     }
 

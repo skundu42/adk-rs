@@ -21,10 +21,10 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3.0", features = ["gemini"] }
+adk-rs = { version = "0.6", features = ["gemini"] }
 
 [dev-dependencies]
-adk-rs = { version = "0.3.0", features = ["gemini", "testing"] }`,
+adk-rs = { version = "0.6", features = ["gemini", "testing"] }`,
     },
     { kind: 'h2', text: 'MockModel' },
     {
@@ -122,42 +122,19 @@ model.push_text("I ran the script and got 'hello'.");`,
     { kind: 'h2', text: 'Testing tools in isolation' },
     {
       kind: 'p',
-      text: 'A tool’s `run` takes args and a `ToolContext`, and `ToolContext::new(Arc<InvocationContext>)` is public — so tools are testable without an agent or model. `InvocationContext` is a plain struct with public fields; the only ceremony is filling them in (the crate’s own eval runner and A2A tests construct it the same way). Note that `session` uses `parking_lot::Mutex`, so add `parking_lot` to dev-dependencies.',
+      text: 'A tool’s `run` takes args and a `ToolContext`, and `ToolContext::new(Arc<InvocationContext>)` is public — so tools are testable without an agent or model. `adk_rs::core::testing::test_invocation_context()` returns a minimal `InvocationContext` backed by `NoopSessionService` (a do-nothing `SessionService` for tests that never touch persistence); mutate the returned value to attach services or user content before wrapping it in an `Arc`.',
     },
     {
       kind: 'code',
       lang: 'rust',
       title: 'Driving a tool directly',
-      code: `use adk_rs::core::{
-    InvocationContext, InvocationOrigin, RunConfig, Session, SessionService, ToolContext,
-};
-use adk_rs::services::mem::InMemorySessionService;
-use parking_lot::Mutex;
+      code: `use adk_rs::core::ToolContext;
+use adk_rs::core::testing::test_invocation_context;
 use std::sync::Arc;
-
-fn test_ctx() -> Arc<InvocationContext> {
-    let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
-    Arc::new(InvocationContext {
-        app_name: "test".into(),
-        user_id: "u".into(),
-        invocation_id: InvocationContext::new_id(),
-        session: Arc::new(Mutex::new(Session::new("test", "u", "s"))),
-        session_service: svc,
-        artifact_service: None,
-        memory_service: None,
-        credential_service: None,
-        run_config: RunConfig::default(),
-        origin: InvocationOrigin::Api,
-        user_content: None,
-        llm_call_count: Arc::new(Mutex::new(0)),
-        cancellation: Default::default(),
-        attributes: Arc::new(Mutex::new(Default::default())),
-    })
-}
 
 #[tokio::test]
 async fn weather_tool_returns_report() {
-    let mut tctx = ToolContext::new(test_ctx());
+    let mut tctx = ToolContext::new(Arc::new(test_invocation_context()));
     let tool = get_weather(); // #[tool]-generated constructor
     let out = tool
         .run(serde_json::json!({"city": "Paris"}), &mut tctx)
@@ -169,6 +146,10 @@ async fn weather_tool_returns_report() {
     {
       kind: 'p',
       text: 'After the call you can also assert on what the tool wrote back through the context: `tctx.state_delta`, `tctx.artifact_delta`, `tctx.transfer_to_agent`, `tctx.escalate`, and `tctx.skip_summarization` are all public fields.',
+    },
+    {
+      kind: 'p',
+      text: 'The module also ships `MockEmbedder` — a deterministic hashed bag-of-words `Embedder` for testing semantic memory offline. And the repo pins the `#[tool]` macro’s misuse diagnostics with a trybuild compile-fail suite (`tests/macro_trybuild.rs` + `tests/ui/`).',
     },
     { kind: 'h2', text: 'Provider-level HTTP testing' },
     {

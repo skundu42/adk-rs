@@ -52,6 +52,11 @@ pub mod __private {
     pub use crate::core::{DynTool, ToolContext};
     pub use crate::error::{Error, Result, ToolError};
     pub use crate::genai_types::{FunctionDeclaration, Schema};
+    // Runtime crates the expansion depends on. Re-exported so downstream
+    // crates only need `adk-rs` in their Cargo.toml for `#[tool]` to compile.
+    pub use ::async_trait;
+    pub use ::schemars;
+    pub use ::serde_json;
 }
 
 #[cfg(feature = "macros")]

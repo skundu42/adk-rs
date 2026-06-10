@@ -81,60 +81,10 @@ pub fn exit_loop() -> Arc<dyn DynTool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{GetSessionConfig, ListSessionsResponse, SessionService};
-    use crate::core::{InvocationContext, InvocationOrigin, RunConfig, Session, State};
-    use parking_lot::Mutex;
     use serde_json::json;
-    use std::collections::HashMap;
-
-    #[derive(Debug)]
-    struct NoopSession;
-    #[async_trait]
-    impl SessionService for NoopSession {
-        async fn create_session(
-            &self,
-            app: &str,
-            user: &str,
-            _: Option<State>,
-            id: Option<&str>,
-        ) -> Result<Session> {
-            Ok(Session::new(app, user, id.unwrap_or("s")))
-        }
-        async fn get_session(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: GetSessionConfig,
-        ) -> Result<Option<Session>> {
-            Ok(None)
-        }
-        async fn list_sessions(&self, _: &str, _: &str) -> Result<ListSessionsResponse> {
-            Ok(ListSessionsResponse::default())
-        }
-        async fn delete_session(&self, _: &str, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-    }
 
     fn ctx() -> ToolContext {
-        let inv = Arc::new(InvocationContext {
-            app_name: "app".into(),
-            user_id: "u".into(),
-            invocation_id: "inv-1".into(),
-            session: Arc::new(Mutex::new(Session::new("app", "u", "s"))),
-            session_service: Arc::new(NoopSession),
-            artifact_service: None,
-            memory_service: None,
-            credential_service: None,
-            run_config: RunConfig::default(),
-            origin: InvocationOrigin::Api,
-            user_content: None,
-            llm_call_count: Arc::new(Mutex::new(0)),
-            cancellation: Default::default(),
-            attributes: Arc::new(Mutex::new(HashMap::new())),
-        });
-        ToolContext::new(inv)
+        ToolContext::new(Arc::new(crate::core::testing::test_invocation_context()))
     }
 
     #[tokio::test]

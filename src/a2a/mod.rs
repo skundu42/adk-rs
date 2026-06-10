@@ -16,8 +16,9 @@
 //!   [`task_service::InMemoryTaskService`] is shipped in this crate; users
 //!   can plug in their own Redis / SQL / Firestore backend.
 //!
-//! Push notifications (`tasks/pushNotificationConfig/*`) are not yet
-//! implemented and are tracked under PARITY.md.
+//! Push notifications (`tasks/pushNotificationConfig/set|get|list|delete`)
+//! are implemented: registered webhook configs receive task status updates
+//! via [`push_notifier::PushNotifier`].
 
 mod client;
 pub mod mapping;

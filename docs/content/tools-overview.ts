@@ -65,13 +65,17 @@ export const page: DocPage = {
         ['`function_call_id`', '`Option<String>`', 'Id of the `FunctionCall` being served (matches `FunctionCall::id`).'],
         ['`state_delta`', '`StateDelta`', 'Key/value writes merged into [session state](/docs/sessions-and-state) when the event is appended.'],
         ['`artifact_delta`', '`IndexMap<String, u64>`', 'Filename → new version, populated by `save_artifact`.'],
-        ['`skip_summarization`', '`bool`', 'When set, the runner skips LLM summarization of the tool response.'],
+        ['`skip_summarization`', '`bool`', 'When a tool sets it, the agent ends the turn right after the tool-response event — the tool response becomes the final answer, with no further model call.'],
         ['`transfer_to_agent`', '`Option<String>`', 'Hands the rest of the invocation to the named agent in the tree.'],
         ['`escalate`', '`bool`', 'Unwinds escalation — e.g. breaks a `LoopAgent` iteration.'],
         ['`long_running`', '`bool`', 'Marks this call as a long-running operation handle, pausing the invocation.'],
         ['`auth_credential`', '`Option<AuthCredential>`', 'Resolved credential, injected by the runner when the tool declared an `auth_config()`.'],
         ['`tool_confirmation`', '`Option<ToolConfirmation>`', 'The user’s approval (with any payload), set before `run` when confirmation was required and granted.'],
       ],
+    },
+    {
+      kind: 'p',
+      text: 'Tool-written `state_delta` and `artifact_delta` ride on the tool-response event’s `actions`, so the session service persists them when the event is appended.',
     },
     {
       kind: 'api',
@@ -102,8 +106,8 @@ export const page: DocPage = {
         '**Preprocess.** Every attached tool gets `process_llm_request(&mut req, ...)` — most append their declaration; passive tools inject config — and is registered in `req.tools_dict` under its name.',
         '**Call the model.** The response becomes an [event](/docs/events); missing `FunctionCall` ids are synthesized so resume and replay stay stable.',
         '**No function calls?** The event is the final response (after optional [code execution](/docs/code-execution) of any `ExecutableCode` parts).',
-        '**Dispatch.** Each call is looked up in `tools_dict` and pushed through the gate pipeline — confirmation → auth → `run`. Unknown names error with `ToolError::Unknown`.',
-        '**Collect actions.** `transfer_to_agent` reroutes the invocation to a sub-agent; `escalate` emits an escalation marker and stops; long-running or consent-gated calls get `will_continue: Some(true)` and pause the invocation.',
+        '**Dispatch.** Each call is looked up in `tools_dict` and pushed through the gate pipeline — confirmation → auth → `run`. The run itself is wrapped by the agent’s [callbacks](/docs/callbacks-and-plugins): `before_tool` may rewrite the args or short-circuit with a ready-made result, `after_tool` may rewrite the result, and `on_tool_error` may recover a failed call (otherwise `{"error": ...}` is surfaced to the model). Unknown names error with `ToolError::Unknown`.',
+        '**Collect actions.** `transfer_to_agent` reroutes the invocation to a sub-agent — an unknown or unreachable target produces a recoverable `{"error": "unknown agent ..."}` tool response instead of aborting the invocation; `escalate` emits an escalation marker and stops; long-running or consent-gated calls get `will_continue: Some(true)` and pause the invocation.',
         '**Loop.** Tool responses are appended to `req.contents` as a `Role::Tool` turn and the cycle repeats.',
       ],
     },
@@ -137,6 +141,11 @@ let agent = LlmAgent::builder("orchestrator")
     .tool(exit_loop())
     .tools(my_openapi_tools) // any IntoIterator<Item = Arc<dyn DynTool>>
     .build()?;`,
+    },
+    {
+      kind: 'callout',
+      tone: 'note',
+      text: 'You rarely need to attach `transfer_to_agent_tool()` by hand: an `LlmAgent` that declares `sub_agents` auto-registers it (unless `disable_transfer` is set). Manual attachment is only for transfer without declared sub-agents.',
     },
     { kind: 'h2', text: 'Related pages' },
     {

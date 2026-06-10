@@ -20,7 +20,7 @@ pub use generate_content_config::{
     GenerateContentConfig, HarmBlockThreshold, HarmCategory, SafetySetting, ThinkingConfig,
     ToolConfig, ToolMode,
 };
-pub use part::{CodeExecutionResult, ExecutableCode, FileData, InlineData, Outcome, Part};
+pub use part::{CodeExecutionResult, ExecutableCode, FileData, InlineData, Outcome, Part, Thought};
 pub use response::{
     Candidate, CitationMetadata, FinishReason, GenerateContentResponse, GroundingMetadata,
     PromptFeedback, SafetyRating, UsageMetadata,

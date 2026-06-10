@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::core::LlmResponse;
 use crate::core::stream::LlmResponseStream;
 use crate::error::{Error, ProviderError};
-use crate::genai_types::{Content, FinishReason, FunctionCall, Part, Role, UsageMetadata};
+use crate::genai_types::{Content, FinishReason, FunctionCall, Part, Role, Thought, UsageMetadata};
 
 #[derive(Debug, Default)]
 struct ToolUseAccum {
@@ -35,14 +35,7 @@ fn chunk(parts: Vec<Part>) -> LlmResponse {
     }
 }
 
-fn map_stop_reason(s: &str) -> FinishReason {
-    match s {
-        "max_tokens" => FinishReason::MaxTokens,
-        "refusal" => FinishReason::Safety,
-        // end_turn, stop_sequence, tool_use, pause_turn
-        _ => FinishReason::Stop,
-    }
-}
+use crate::providers::anthropic::convert::map_stop_reason;
 
 /// Convert a streaming Messages response into an [`LlmResponseStream`].
 pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
@@ -55,6 +48,10 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
     let stream = async_stream::try_stream! {
         // index → in-flight tool_use accumulation.
         let mut tools: BTreeMap<u64, ToolUseAccum> = BTreeMap::new();
+        // index → signature accumulated for an in-flight thinking block.
+        // Emitted as a signature-only Thought chunk on content_block_stop;
+        // the consumer's chunk merge attaches it to the accumulated text.
+        let mut thinking_sigs: BTreeMap<u64, String> = BTreeMap::new();
         let mut usage = UsageMetadata::default();
         let mut model_version: Option<String> = None;
         let mut finish: Option<FinishReason> = None;
@@ -88,12 +85,22 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
                 "content_block_start" => {
                     let index = v.get("index").and_then(Value::as_u64).unwrap_or(0);
                     let block = &v["content_block"];
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        tools.insert(index, ToolUseAccum {
-                            id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            json: String::new(),
-                        });
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_use") => {
+                            tools.insert(index, ToolUseAccum {
+                                id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                                json: String::new(),
+                            });
+                        }
+                        // Redacted thinking arrives whole in the start event;
+                        // the opaque payload must round-trip verbatim.
+                        Some("redacted_thinking") => {
+                            if let Some(data) = block.get("data").and_then(Value::as_str) {
+                                yield chunk(vec![Part::RedactedThought(data.to_string())]);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 "content_block_delta" => {
@@ -107,7 +114,15 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
                         }
                         "thinking_delta" => {
                             if let Some(t) = delta.get("thinking").and_then(Value::as_str) {
-                                yield chunk(vec![Part::Thought(t.to_string())]);
+                                yield chunk(vec![Part::Thought(Thought::new(t))]);
+                            }
+                        }
+                        "signature_delta" => {
+                            if let Some(sig) = delta.get("signature").and_then(Value::as_str) {
+                                thinking_sigs
+                                    .entry(index)
+                                    .or_default()
+                                    .push_str(sig);
                             }
                         }
                         "input_json_delta" => {
@@ -118,12 +133,21 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
                                 acc.json.push_str(frag);
                             }
                         }
-                        // signature_delta and future delta kinds: skip.
+                        // Future delta kinds: skip.
                         _ => {}
                     }
                 }
                 "content_block_stop" => {
                     let index = v.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    if let Some(sig) = thinking_sigs.remove(&index) {
+                        // Signature-only carrier chunk: the consumer's merge
+                        // concatenates thought text and adopts the signature,
+                        // so the aggregated part can be replayed verbatim.
+                        yield chunk(vec![Part::Thought(Thought {
+                            text: String::new(),
+                            signature: Some(sig),
+                        })]);
+                    }
                     if let Some(acc) = tools.remove(&index) {
                         let args: Value = if acc.json.trim().is_empty() {
                             Value::Object(Default::default())
@@ -138,6 +162,7 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
                             id: Some(acc.id),
                             name: acc.name,
                             args,
+                            thought_signature: None,
                         })]);
                     }
                 }

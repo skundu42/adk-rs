@@ -99,6 +99,34 @@ pub struct CodeExecutionResult {
     pub output: Option<String>,
 }
 
+/// A reasoning ("thought") trace plus the provider-issued signature that
+/// must be echoed back verbatim on later turns (Anthropic thinking-block
+/// `signature`, Gemini `thoughtSignature`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Thought {
+    /// The visible reasoning text.
+    pub text: String,
+    /// Provider signature. Round-trips opaquely; never synthesise one.
+    pub signature: Option<String>,
+}
+
+impl Thought {
+    /// Construct an unsigned thought.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            signature: None,
+        }
+    }
+
+    /// Attach the provider signature.
+    #[must_use]
+    pub fn with_signature(mut self, sig: impl Into<String>) -> Self {
+        self.signature = Some(sig.into());
+        self
+    }
+}
+
 /// A discriminated content unit. See module docs for the rationale behind the
 /// hand-written `Serialize`/`Deserialize`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,14 +145,23 @@ pub enum Part {
     ExecutableCode(ExecutableCode),
     /// Result of code execution.
     CodeExecutionResult(CodeExecutionResult),
-    /// "Thought" trace text (Gemini reasoning).
-    Thought(String),
+    /// "Thought" trace (model reasoning), with optional provider signature.
+    Thought(Thought),
+    /// Encrypted reasoning the provider withheld (Anthropic
+    /// `redacted_thinking`). The opaque payload must be echoed back
+    /// verbatim on later turns; it is never human-readable.
+    RedactedThought(String),
 }
 
 impl Part {
     /// Convenience: build a text part.
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
+    }
+
+    /// Convenience: build an unsigned thought part.
+    pub fn thought(s: impl Into<String>) -> Self {
+        Self::Thought(Thought::new(s))
     }
 
     /// Convenience: build an inline-data part from raw bytes.
@@ -136,7 +173,8 @@ impl Part {
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(t) | Self::Thought(t) => Some(t),
+            Self::Text(t) => Some(t),
+            Self::Thought(t) => Some(&t.text),
             _ => None,
         }
     }
@@ -164,17 +202,38 @@ impl Part {
 
 impl Serialize for Part {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut m = s.serialize_map(Some(1))?;
+        let mut m = s.serialize_map(None)?;
         match self {
             Self::Text(t) => m.serialize_entry("text", t)?,
             Self::Thought(t) => {
-                // Gemini represents a thought as `{text: "...", thought: true}`.
-                m.serialize_entry("text", t)?;
+                // Gemini represents a thought as `{text: "...", thought: true}`
+                // with the signature as a sibling `thoughtSignature` key.
+                m.serialize_entry("text", &t.text)?;
                 m.serialize_entry("thought", &true)?;
+                if let Some(sig) = &t.signature {
+                    m.serialize_entry("thoughtSignature", sig)?;
+                }
+            }
+            Self::RedactedThought(data) => {
+                // adk extension (Anthropic `redacted_thinking`); Gemini has
+                // no equivalent and the provider converters handle it
+                // before serialization.
+                m.serialize_entry("redactedThought", data)?;
             }
             Self::InlineData(d) => m.serialize_entry("inlineData", d)?,
             Self::FileData(d) => m.serialize_entry("fileData", d)?,
-            Self::FunctionCall(c) => m.serialize_entry("functionCall", c)?,
+            Self::FunctionCall(c) => {
+                // The thought signature rides at the part level (Gemini's
+                // wire shape), not inside the functionCall object.
+                if let Some(sig) = &c.thought_signature {
+                    let mut stripped = c.clone();
+                    stripped.thought_signature = None;
+                    m.serialize_entry("functionCall", &stripped)?;
+                    m.serialize_entry("thoughtSignature", sig)?;
+                } else {
+                    m.serialize_entry("functionCall", c)?;
+                }
+            }
             Self::FunctionResponse(r) => m.serialize_entry("functionResponse", r)?,
             Self::ExecutableCode(c) => m.serialize_entry("executableCode", c)?,
             Self::CodeExecutionResult(r) => m.serialize_entry("codeExecutionResult", r)?,
@@ -194,6 +253,8 @@ impl<'de> Deserialize<'de> for Part {
             fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Part, A::Error> {
                 let mut text: Option<String> = None;
                 let mut thought: Option<bool> = None;
+                let mut thought_signature: Option<String> = None;
+                let mut redacted_thought: Option<String> = None;
                 let mut inline_data: Option<InlineData> = None;
                 let mut file_data: Option<FileData> = None;
                 let mut function_call: Option<FunctionCall> = None;
@@ -205,6 +266,12 @@ impl<'de> Deserialize<'de> for Part {
                     match key.as_str() {
                         "text" => text = Some(m.next_value()?),
                         "thought" => thought = Some(m.next_value()?),
+                        "thoughtSignature" | "thought_signature" => {
+                            thought_signature = Some(m.next_value()?);
+                        }
+                        "redactedThought" | "redacted_thought" => {
+                            redacted_thought = Some(m.next_value()?);
+                        }
                         "inlineData" | "inline_data" => inline_data = Some(m.next_value()?),
                         "fileData" | "file_data" => file_data = Some(m.next_value()?),
                         "functionCall" | "function_call" => function_call = Some(m.next_value()?),
@@ -229,10 +296,16 @@ impl<'de> Deserialize<'de> for Part {
 
                 if let Some(t) = text {
                     return Ok(if thought.unwrap_or(false) {
-                        Part::Thought(t)
+                        Part::Thought(Thought {
+                            text: t,
+                            signature: thought_signature,
+                        })
                     } else {
                         Part::Text(t)
                     });
+                }
+                if let Some(data) = redacted_thought {
+                    return Ok(Part::RedactedThought(data));
                 }
                 if let Some(d) = inline_data {
                     return Ok(Part::InlineData(d));
@@ -240,7 +313,11 @@ impl<'de> Deserialize<'de> for Part {
                 if let Some(d) = file_data {
                     return Ok(Part::FileData(d));
                 }
-                if let Some(c) = function_call {
+                if let Some(mut c) = function_call {
+                    // The signature rides at the part level on the wire.
+                    if c.thought_signature.is_none() {
+                        c.thought_signature = thought_signature;
+                    }
                     return Ok(Part::FunctionCall(c));
                 }
                 if let Some(r) = function_response {
@@ -304,9 +381,48 @@ mod tests {
 
     #[test]
     fn thought_round_trip() {
-        let p = Part::Thought("thinking".into());
+        let p = Part::thought("thinking");
         let j = serde_json::to_value(&p).unwrap();
         assert_eq!(j, json!({"text": "thinking", "thought": true}));
+        let back: Part = serde_json::from_value(j).unwrap();
+        assert_eq!(p, back);
+    }
+
+    /// Thought signatures (Anthropic `signature`, Gemini `thoughtSignature`)
+    /// must round-trip verbatim — providers reject replayed thinking that
+    /// lost its signature.
+    #[test]
+    fn signed_thought_round_trip() {
+        let p = Part::Thought(Thought::new("deep").with_signature("sig-abc"));
+        let j = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            j,
+            json!({"text": "deep", "thought": true, "thoughtSignature": "sig-abc"})
+        );
+        let back: Part = serde_json::from_value(j).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn redacted_thought_round_trips() {
+        let p = Part::RedactedThought("opaque-blob".into());
+        let j = serde_json::to_value(&p).unwrap();
+        assert_eq!(j, json!({"redactedThought": "opaque-blob"}));
+        let back: Part = serde_json::from_value(j).unwrap();
+        assert_eq!(p, back);
+    }
+
+    /// Gemini attaches `thoughtSignature` as a sibling of `functionCall`
+    /// (mandatory to echo back on Gemini 3 function calling); it must
+    /// survive the round-trip on the part, not nested in the call object.
+    #[test]
+    fn function_call_thought_signature_round_trips() {
+        let mut fc = FunctionCall::new("f", json!({"x": 1}));
+        fc.thought_signature = Some("sig-fc".into());
+        let p = Part::FunctionCall(fc);
+        let j = serde_json::to_value(&p).unwrap();
+        assert_eq!(j["thoughtSignature"], "sig-fc");
+        assert!(j["functionCall"].get("thoughtSignature").is_none());
         let back: Part = serde_json::from_value(j).unwrap();
         assert_eq!(p, back);
     }

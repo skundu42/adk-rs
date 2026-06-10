@@ -94,6 +94,7 @@ impl DynTool for AgentTool {
             llm_call_count: ctx.invocation.llm_call_count.clone(),
             cancellation: ctx.invocation.cancellation.clone(),
             attributes: ctx.invocation.attributes.clone(),
+            root_agent: ctx.invocation.root_agent.clone(),
         });
         let mut stream = self.agent.clone().run(sub_ctx).await?;
         let mut out = String::new();

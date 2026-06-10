@@ -19,9 +19,10 @@ export const page: DocPage = {
     {
       kind: 'list',
       items: [
-        '**Who checks**: the provider clients (`Gemini`, `Anthropic`, `OpenAi`), `RestApiTool` ([OpenAPI tools](/docs/openapi-tools)), the [MCP](/docs/mcp) HTTP transport, the [A2A client](/docs/a2a) when its extra headers look credential-bearing (`Authorization`, `Cookie`, `Proxy-Authorization`, `x-api*`, `x-auth*`), and A2A push-notification webhook URLs.',
+        '**Who checks**: the provider clients (`Gemini`, `Anthropic`, `OpenAi`), `RestApiTool` ([OpenAPI tools](/docs/openapi-tools)), the [MCP](/docs/mcp) HTTP transport, the [A2A client](/docs/a2a) when its extra headers look credential-bearing (`Authorization`, `Cookie`, `Proxy-Authorization`, `x-api*`, `x-auth*` — the classification is the public helper `transport_security::header_looks_credential_bearing(name)`), and A2A push-notification webhook URLs.',
         '**Loopback exemption**: `localhost`, any `127.0.0.0/8` address, and `[::1]` pass — this is what lets tests and local mocks (e.g. wiremock, Ollama) work over plain HTTP.',
-        '**No smuggling**: the check strips userinfo, IPv6 brackets, and ports before classifying the host, so `http://127.0.0.1@evil.example.com` is still rejected. Unknown schemes (`ftp://`, `file://`, scheme-less strings) always fail.',
+        '**No parser differential**: `is_secure_url` parses with the WHATWG `url` crate — the same parser reqwest uses — so the validated host is exactly the host the request goes to. `http://127.0.0.1@evil.example.com` is rejected, and so is `http://evil.com\\@localhost/`: in WHATWG http(s) URLs the `\\` terminates the authority, so the real host is `evil.com`. Unknown schemes (`ftp://`, `file://`, scheme-less strings) always fail.',
+        '**No redirect leaks**: every credential-bearing outbound client disables HTTP redirects, because reqwest re-sends custom headers like `x-api-key` to redirect targets — the three provider clients (and their embedders), the MCP HTTP transport, the A2A client and its agent-card fetch, `RestApiTool`, the A2A push notifier, and the OAuth token clients.',
         '**Secret-safe errors**: the error message names the offending *field* (e.g. `OpenAiConfig.base_url`), never the URL itself, because URLs can carry secrets in their userinfo.',
       ],
     },

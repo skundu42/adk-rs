@@ -20,7 +20,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3", features = [
+adk-rs = { version = "0.6", features = [
   "gemini",     # your provider(s)
   "sqlite",     # durable sessions
   "fs",         # filesystem artifacts

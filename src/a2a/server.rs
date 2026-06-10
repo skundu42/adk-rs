@@ -129,12 +129,10 @@ impl A2aState {
             PushNotifier::new(tasks.clone())
                 .expect("PushNotifier requires a working reqwest HTTP client"),
         );
-        // If the card advertises streaming, it also advertises push by
-        // default — but the source of truth is the agent_card field itself,
-        // which the caller filled in. We don't mutate it here.
+        // This server always implements push notifications, so the
+        // advertised capability is forced on regardless of the caller's
+        // card (the card must not promise less than the endpoint serves).
         let mut card = cfg.agent_card;
-        // Make sure the advertised capability matches reality: this server
-        // supports push notifications.
         card.capabilities.push_notifications = true;
         Self {
             runner,

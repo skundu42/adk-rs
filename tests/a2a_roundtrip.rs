@@ -88,6 +88,7 @@ fn ctx_for(user_text: &str) -> Arc<InvocationContext> {
         llm_call_count: Arc::new(Mutex::new(0)),
         cancellation: Default::default(),
         attributes: Arc::new(Mutex::new(HashMap::new())),
+        root_agent: None,
     })
 }
 

@@ -16,8 +16,6 @@
 //! Mirrors the auth module's token endpoint validation but is always compiled
 //! (no `auth` feature gate) and exposed throughout the crate.
 
-use std::net::IpAddr;
-
 use crate::error::{Error, Result};
 
 /// Return `Ok(())` if `url` is safe to send credentials to, otherwise an
@@ -36,51 +34,40 @@ pub fn require_secure_url(url: &str, field: &str) -> Result<()> {
 
 /// Same as [`require_secure_url`] but returns a `bool`. Useful when the
 /// caller wants to log a warning instead of failing.
+///
+/// Parses with the WHATWG [`url`] crate — the same parser reqwest uses —
+/// so the host this check validates is exactly the host the request goes
+/// to. A hand-rolled parser here would invite differentials (e.g. `\` is a
+/// path separator in WHATWG http(s) URLs, so `http://evil.com\@localhost/`
+/// actually targets `evil.com`).
 #[must_use]
 pub fn is_secure_url(url: &str) -> bool {
-    let url = url.trim();
-    if has_ascii_prefix_ci(url, "https://") {
-        return true;
-    }
-    if let Some(rest) = strip_ascii_prefix_ci(url, "http://") {
-        return is_loopback_authority(rest);
-    }
-    false
-}
-
-fn has_ascii_prefix_ci(s: &str, prefix: &str) -> bool {
-    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-}
-
-fn strip_ascii_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    has_ascii_prefix_ci(s, prefix).then(|| &s[prefix.len()..])
-}
-
-/// Given the part of the URL after `http://`, decide whether the authority
-/// component is a loopback host. Strips userinfo, IPv6 brackets, and the
-/// optional `:port` suffix before checking.
-fn is_loopback_authority(rest: &str) -> bool {
-    // Authority ends at the first `/`, `?`, or `#`.
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    // Strip userinfo (`user:pass@host`).
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    // Strip port.
-    let host = if let Some(stripped) = host_port.strip_prefix('[') {
-        // IPv6 in brackets: `[::1]:1234` → `::1`.
-        match stripped.find(']') {
-            Some(close) => &stripped[..close],
-            None => return false,
-        }
-    } else {
-        host_port.rsplit_once(':').map_or(host_port, |(h, _)| h)
+    let Ok(parsed) = url::Url::parse(url.trim()) else {
+        return false;
     };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
+    match parsed.scheme() {
+        "https" => true,
+        "http" => match parsed.host() {
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false,
     }
-    host.parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
+}
+
+/// Heuristic: would shipping this header to a plaintext endpoint leak a
+/// credential? Matches `Authorization`, `Cookie`, `Proxy-Authorization`,
+/// and the conventional `x-api-*` / `x-auth-*` patterns case-insensitively.
+#[must_use]
+pub fn header_looks_credential_bearing(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "authorization" | "cookie" | "proxy-authorization"
+    ) || lower.starts_with("x-api")
+        || lower.starts_with("x-auth")
 }
 
 #[cfg(test)]
@@ -101,6 +88,20 @@ mod tests {
         assert!(!is_secure_url("http://user:secret@example.com"));
         // Userinfo can't smuggle loopback past the check.
         assert!(!is_secure_url("http://127.0.0.1@example.com"));
+    }
+
+    /// Regression: WHATWG URLs treat `\` as `/` in http(s), so the authority
+    /// of `http://evil.com\@localhost/` ends at the backslash and the real
+    /// host is `evil.com`. A naive authority parser that only splits on
+    /// `/?#` reads `localhost` instead and waves the URL through.
+    #[test]
+    fn backslash_authority_differential_is_rejected() {
+        assert!(!is_secure_url("http://evil.com\\@localhost/"));
+        assert!(!is_secure_url("http://evil.com\\localhost/"));
+        assert!(!is_secure_url("http://evil.com\\@127.0.0.1/"));
+        // Sanity: the parser agrees with reqwest about the real host.
+        let parsed = url::Url::parse("http://evil.com\\@localhost/").unwrap();
+        assert_eq!(parsed.host_str(), Some("evil.com"));
     }
 
     #[test]

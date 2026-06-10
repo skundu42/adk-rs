@@ -66,6 +66,7 @@ impl PushNotifier {
     pub fn new(tasks: Arc<dyn TaskService>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| crate::error::Error::other(format!("push http client: {e}")))?;

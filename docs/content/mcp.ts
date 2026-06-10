@@ -120,7 +120,7 @@ let toolset = McpToolset::http(params)
     { kind: 'h2', text: 'Credentials never travel in plaintext' },
     {
       kind: 'p',
-      text: 'When `McpHttpParams.headers` contains a credential-bearing header — `Authorization`, `Cookie`, `Proxy-Authorization`, or anything starting with `x-api` / `x-auth` (case-insensitive) — the transport requires the URL to be `https://` or a loopback host, refusing construction otherwise. Unauthenticated plaintext HTTP remains allowed, and authenticated loopback (`http://127.0.0.1:...`) works for local development.',
+      text: 'When `McpHttpParams.headers` contains a credential-bearing header — `Authorization`, `Cookie`, `Proxy-Authorization`, or anything starting with `x-api` / `x-auth` (case-insensitive) — the transport requires the URL to be `https://` or a loopback host, refusing construction otherwise. Unauthenticated plaintext HTTP remains allowed, and authenticated loopback (`http://127.0.0.1:...`) works for local development. The transport also disables redirects, so credential-bearing headers can’t be re-sent to a redirect target.',
     },
     { kind: 'h2', text: 'Lower-level access: McpClient' },
     {

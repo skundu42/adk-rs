@@ -21,7 +21,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3", features = ["gemini", "sqlite", "fs"] }
+adk-rs = { version = "0.6", features = ["gemini", "sqlite", "fs"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
 serde_json = "1"`,
@@ -162,7 +162,7 @@ if let Some(finished) = sessions
     {
       kind: 'callout',
       tone: 'warn',
-      text: '`InMemoryMemoryService` does case-insensitive substring search and is itself volatile. For production recall, implement the `MemoryService` trait (two methods) over a vector store or search index; the sessions in SQLite remain your durable source of truth to re-ingest from.',
+      text: '`InMemoryMemoryService` does case-insensitive substring search and is itself volatile. For semantic recall the crate ships `VectorMemoryService` — embedding-based cosine ranking over `GeminiEmbedder` or `OpenAiEmbedder`; see [Memory](/docs/memory). Both stores are process-local, so the sessions in SQLite remain your durable source of truth to re-ingest from; for durable recall, implement the `MemoryService` trait (two methods) over a vector store or search index.',
     },
     { kind: 'h2', text: 'Where next' },
     {

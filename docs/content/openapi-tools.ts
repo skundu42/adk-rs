@@ -54,6 +54,11 @@ export const page: DocPage = {
         },
       ],
     },
+    {
+      kind: 'callout',
+      tone: 'note',
+      text: 'Circular `$ref`s in a spec (e.g. `Category.parent` referencing `Category`) make `from_yaml` / `from_json` / `from_path` fail with `"OpenAPI schema exceeds maximum nesting depth (circular $ref?)"` instead of overflowing the stack.',
+    },
     { kind: 'h2', text: 'How operations become tools' },
     {
       kind: 'list',
@@ -78,7 +83,7 @@ export const page: DocPage = {
       kind: 'callout',
       tone: 'warn',
       title: 'HTTPS guard',
-      text: 'Before attaching any credential, `RestApiTool` checks the final URL with `require_secure_url`: it must be `https://` or a loopback host. This catches both a misconfigured `base_url` and a malicious `servers[]` entry in a third-party spec that would otherwise exfiltrate your token over plaintext. Header values are also validated — a token containing CRLF fails the call instead of silently sending the request unauthenticated.',
+      text: 'Before attaching any credential, `RestApiTool` checks the final URL with `require_secure_url`: it must be `https://` or a loopback host. This catches both a misconfigured `base_url` and a malicious `servers[]` entry in a third-party spec that would otherwise exfiltrate your token over plaintext. Header values are also validated — a token containing CRLF fails the call instead of silently sending the request unauthenticated. The tool’s HTTP client additionally disables redirects: reqwest re-sends custom headers — i.e. your credentials — to redirect targets.',
     },
     { kind: 'h2', text: 'Petstore walkthrough' },
     {

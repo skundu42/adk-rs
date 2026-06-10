@@ -76,7 +76,7 @@ init(TelemetryConfig {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3.0", features = ["gemini", "otel"] }
+adk-rs = { version = "0.6", features = ["gemini", "otel"] }
 # "otel" implies "telemetry"`,
     },
     {

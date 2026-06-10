@@ -4,16 +4,18 @@
 //! Pydantic shapes. The places we deviate (system instruction handling,
 //! schema sanitization) are documented inline.
 
+use std::borrow::Cow;
+
 use serde::Serialize;
 
 use crate::core::{LlmRequest, LlmResponse};
 use crate::error::Result;
-use crate::genai_types::{Content, GenerateContentConfig, GenerateContentResponse};
+use crate::genai_types::{Content, GenerateContentConfig, GenerateContentResponse, Part};
 
 /// Gemini wire-format request body.
 #[derive(Debug, Serialize)]
 pub(crate) struct WireRequest<'a> {
-    pub contents: &'a [Content],
+    pub contents: Cow<'a, [Content]>,
     /// `systemInstruction` is `Content`-shaped on Gemini.
     #[serde(skip_serializing_if = "Option::is_none", rename = "systemInstruction")]
     pub system_instruction: Option<&'a Content>,
@@ -109,9 +111,38 @@ fn split_config(c: &GenerateContentConfig) -> Option<GenerationConfig<'_>> {
     })
 }
 
+/// Gemini has no equivalent of Anthropic's `redacted_thinking`; strip those
+/// parts (rare: only cross-provider replay produces them) so the request
+/// doesn't carry a key the API would reject. Borrows when nothing needs
+/// stripping — the overwhelmingly common case.
+fn wire_contents(contents: &[Content]) -> Cow<'_, [Content]> {
+    let has_redacted = contents.iter().any(|c| {
+        c.parts
+            .iter()
+            .any(|p| matches!(p, Part::RedactedThought(_)))
+    });
+    if !has_redacted {
+        return Cow::Borrowed(contents);
+    }
+    Cow::Owned(
+        contents
+            .iter()
+            .map(|c| Content {
+                role: c.role,
+                parts: c
+                    .parts
+                    .iter()
+                    .filter(|p| !matches!(p, Part::RedactedThought(_)))
+                    .cloned()
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn to_wire(req: &LlmRequest) -> WireRequest<'_> {
     WireRequest {
-        contents: &req.contents,
+        contents: wire_contents(&req.contents),
         system_instruction: req.config.system_instruction.as_ref(),
         tools: &req.config.tools,
         tool_config: req.config.tool_config.as_ref(),
@@ -125,7 +156,7 @@ pub(crate) fn to_wire(req: &LlmRequest) -> WireRequest<'_> {
 /// prefix (system instruction + tools) is omitted from the body.
 pub(crate) fn to_wire_cached<'a>(req: &'a LlmRequest, cache_name: &'a str) -> WireRequest<'a> {
     WireRequest {
-        contents: &req.contents,
+        contents: wire_contents(&req.contents),
         system_instruction: None,
         tools: &[],
         tool_config: req.config.tool_config.as_ref(),
@@ -141,24 +172,12 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
     Ok(LlmResponse::from_generate(resp))
 }
 
-/// Decode a single SSE chunk into an [`LlmResponse`].
+/// Decode a single SSE chunk into an [`LlmResponse`]. Chunks are emitted
+/// as-is: consumers treat a chunk without a finish reason as in-progress
+/// and the one carrying it as final.
 pub(crate) fn parse_stream_chunk(payload: &str) -> Result<LlmResponse> {
     let resp: GenerateContentResponse = serde_json::from_str(payload)?;
-    let mut r = LlmResponse::from_generate(resp);
-    // Streamed chunks are partial unless they carry a `STOP` finish reason.
-    if r.finish_reason
-        .map(|f| matches!(f, crate::genai_types::FinishReason::Stop))
-        .unwrap_or(false)
-    {
-        // final
-    } else if r.content.is_some() {
-        r = LlmResponse {
-            // mark as a partial in-progress chunk
-            finish_reason: r.finish_reason,
-            ..r
-        };
-    }
-    Ok(r)
+    Ok(LlmResponse::from_generate(resp))
 }
 
 #[cfg(test)]

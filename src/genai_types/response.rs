@@ -31,6 +31,14 @@ pub enum FinishReason {
     Spii,
     /// Malformed function call.
     MalformedFunctionCall,
+    /// Blocked by image-safety filters.
+    ImageSafety,
+    /// The model called a tool it was not offered.
+    UnexpectedToolCall,
+    /// Catch-all for finish reasons this crate doesn't know yet. Without it
+    /// a single unrecognised wire value would fail the whole response.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One safety rating produced by the provider.
@@ -60,6 +68,9 @@ pub enum HarmProbability {
     Medium,
     /// High.
     High,
+    /// Catch-all for probability buckets this crate doesn't know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Grounding metadata (Google Search citations).
@@ -245,5 +256,39 @@ mod tests {
         assert_eq!(j, serde_json::json!({}));
         let back: GenerateContentResponse = serde_json::from_value(j).unwrap();
         assert_eq!(r, back);
+    }
+
+    /// Regression: wire values this crate doesn't know yet (new finish
+    /// reasons, harm categories, probability buckets) must not fail the
+    /// whole response.
+    #[test]
+    fn unknown_enum_values_fall_back_instead_of_failing() {
+        let j = serde_json::json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "ok"}]},
+                "finishReason": "SOME_FUTURE_REASON",
+                "safetyRatings": [{
+                    "category": "HARM_CATEGORY_FROM_THE_FUTURE",
+                    "probability": "EXTREMELY_HIGH"
+                }]
+            }]
+        });
+        let r: GenerateContentResponse = serde_json::from_value(j).unwrap();
+        assert_eq!(r.candidates[0].finish_reason, Some(FinishReason::Unknown));
+        assert_eq!(
+            r.candidates[0].safety_ratings[0].category,
+            HarmCategory::Unknown
+        );
+        assert_eq!(
+            r.candidates[0].safety_ratings[0].probability,
+            Some(HarmProbability::Unknown)
+        );
+        // Known values still parse.
+        let j = serde_json::json!({"candidates": [{"finishReason": "IMAGE_SAFETY"}]});
+        let r: GenerateContentResponse = serde_json::from_value(j).unwrap();
+        assert_eq!(
+            r.candidates[0].finish_reason,
+            Some(FinishReason::ImageSafety)
+        );
     }
 }

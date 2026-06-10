@@ -65,7 +65,7 @@ while let Some(event) = events.next().await {
     { kind: 'h2', text: 'Partial events and turn_complete' },
     {
       kind: 'p',
-      text: 'The [`Event`](/docs/events) contract for streaming is two optional flags. `partial: Some(true)` marks a transient chunk: the session layer refuses to persist it (`apply_event_to_session` and `append_event_locked` both return early for partials), and the runner only mirrors **non-partial** events into the session store. `turn_complete: Some(true)` marks the event that ends a model turn — in the bundled `LlmAgent` every model-response event is stamped with it.',
+      text: 'The [`Event`](/docs/events) contract for streaming is two optional flags. `partial: Some(true)` marks a transient chunk: the session layer refuses to persist it (`apply_event_to_session` and `append_event_locked` both return early for partials), and the runner only mirrors **non-partial** events into the session store. `turn_complete: Some(true)` marks the event that ends a model turn — in the bundled `LlmAgent`, partial events carry `turn_complete: None` and only the final model-response event of a turn is stamped with `Some(true)`.',
     },
     {
       kind: 'list',
@@ -78,7 +78,7 @@ while let Some(event) = events.next().await {
     {
       kind: 'callout',
       tone: 'note',
-      text: 'In v0.3.0 the `LlmAgent` turn loop issues one `generate_content` call per turn and emits whole-turn events, so the event stream is incremental at event granularity (each model turn, tool call, and tool result is yielded as soon as it happens). Token-level provider streams are available directly through `Model::stream_generate_content`; the `partial`/`turn_complete` fields define how such chunks are represented as events.',
+      text: 'With `StreamingMode::Sse`, the `LlmAgent` loop calls `stream_generate_content` and yields each content-bearing chunk as an event with `partial: Some(true)` (and `turn_complete` unset), then folds the chunks into one aggregated response that is persisted as the usual whole-turn event — the runner never persists partials. Aggregation: adjacent `Text`/`Thought` deltas concatenate, tool calls arrive whole, and the finish reason and usage metadata are adopted from whichever chunk carries them.',
     },
     { kind: 'h2', text: 'LlmResponseStream and the Model trait' },
     {

@@ -45,7 +45,9 @@ pub struct GeminiConfig {
     pub api_version: String,
     /// API key (required). If empty, loaded from `$GOOGLE_API_KEY`.
     pub api_key: String,
-    /// HTTP request timeout.
+    /// Total timeout for non-streaming requests. Streaming requests are
+    /// exempt (an SSE body lasts as long as the generation does); only the
+    /// connect timeout applies to them.
     pub timeout: Duration,
     /// Retry policy for transient failures (429 / 5xx / connect errors).
     pub retry: RetryConfig,
@@ -81,8 +83,14 @@ impl Gemini {
         // Refuse to ship an API key over plaintext HTTP. Loopback is allowed
         // for local mocks (the test suite below depends on this).
         crate::transport_security::require_secure_url(&cfg.base_url, "GeminiConfig.base_url")?;
+        // No client-wide total timeout: it would also cap streaming bodies,
+        // killing any SSE generation longer than the timeout. Unary calls
+        // apply `cfg.timeout` per-request instead. Redirects are disabled:
+        // reqwest re-sends custom headers (`x-goog-api-key`) on redirect,
+        // so a redirecting endpoint could exfiltrate the key.
         let http = Client::builder()
-            .timeout(cfg.timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -243,6 +251,7 @@ impl Gemini {
         let resp = send_with_retry(&self.cfg.retry, || {
             self.http
                 .post(&url)
+                .timeout(self.cfg.timeout)
                 .header("x-goog-api-key", key.clone())
                 .header("content-type", "application/json")
                 .body(body.clone())
@@ -311,6 +320,7 @@ impl Model for Gemini {
         let mut resp = send_with_retry(&self.cfg.retry, || {
             self.http
                 .post(&url)
+                .timeout(self.cfg.timeout)
                 .header("x-goog-api-key", key.clone())
                 .header("content-type", "application/json")
                 .body(body.clone())
@@ -333,6 +343,7 @@ impl Model for Gemini {
                 resp = send_with_retry(&self.cfg.retry, || {
                     self.http
                         .post(&url)
+                        .timeout(self.cfg.timeout)
                         .header("x-goog-api-key", key.clone())
                         .header("content-type", "application/json")
                         .body(body.clone())

@@ -33,6 +33,7 @@ impl GeminiEmbedder {
         crate::transport_security::require_secure_url(&cfg.base_url, "GeminiConfig.base_url")?;
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ProviderError::Transport(e.to_string()))?;

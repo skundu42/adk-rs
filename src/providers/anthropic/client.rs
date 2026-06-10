@@ -23,7 +23,9 @@ pub struct AnthropicConfig {
     pub anthropic_version: String,
     /// API key.
     pub api_key: String,
-    /// HTTP request timeout.
+    /// Total timeout for non-streaming requests. Streaming requests are
+    /// exempt (an SSE body lasts as long as the generation does); only the
+    /// connect timeout applies to them.
     pub timeout: Duration,
     /// Retry policy for transient failures (429 / 529 / 5xx / connect errors).
     pub retry: RetryConfig,
@@ -53,8 +55,14 @@ impl Anthropic {
     /// Construct.
     pub fn new(model_name: impl Into<String>, cfg: AnthropicConfig) -> Result<Self> {
         crate::transport_security::require_secure_url(&cfg.base_url, "AnthropicConfig.base_url")?;
+        // No client-wide total timeout: it would also cap streaming bodies,
+        // killing any SSE generation longer than the timeout. Unary calls
+        // apply `cfg.timeout` per-request instead. Redirects are disabled:
+        // reqwest re-sends custom headers (`x-api-key`) on redirect, so a
+        // redirecting endpoint could exfiltrate the key to another host.
         let http = Client::builder()
-            .timeout(cfg.timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -104,6 +112,7 @@ impl Model for Anthropic {
         let resp = send_with_retry(&self.cfg.retry, || {
             self.http
                 .post(self.endpoint())
+                .timeout(self.cfg.timeout)
                 .header("x-api-key", &self.cfg.api_key)
                 .header("anthropic-version", &self.cfg.anthropic_version)
                 .header("content-type", "application/json")
@@ -277,5 +286,85 @@ mod tests {
         let usage = last.usage_metadata.unwrap();
         assert_eq!(usage.prompt_token_count, Some(7));
         assert_eq!(usage.candidates_token_count, Some(3));
+    }
+
+    /// Thinking streams as text deltas plus a trailing signature-only
+    /// carrier chunk; redacted thinking arrives whole. The signature must
+    /// survive so the aggregated thought can be replayed verbatim.
+    #[tokio::test]
+    async fn streaming_decodes_thinking_with_signature() {
+        use crate::genai_types::{Part, Thought};
+        use futures::TryStreamExt;
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-xyz\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+        let a = Anthropic::new(
+            "claude-sonnet-4-6",
+            AnthropicConfig {
+                base_url: server.uri(),
+                api_key: "k".into(),
+                ..AnthropicConfig::default()
+            },
+        )
+        .unwrap();
+        let stream = a
+            .stream_generate_content(LlmRequest {
+                contents: vec![crate::genai_types::Content::user_text("hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let chunks: Vec<_> = stream.try_collect().await.unwrap();
+
+        // 2 thinking deltas + signature carrier + redacted + text + final.
+        assert_eq!(chunks.len(), 6);
+        let part0 = &chunks[0].content.as_ref().unwrap().parts[0];
+        assert_eq!(*part0, Part::Thought(Thought::new("Let me ")));
+        let sig_carrier = &chunks[2].content.as_ref().unwrap().parts[0];
+        assert_eq!(
+            *sig_carrier,
+            Part::Thought(Thought {
+                text: String::new(),
+                signature: Some("sig-xyz".into()),
+            })
+        );
+        let redacted = &chunks[3].content.as_ref().unwrap().parts[0];
+        assert_eq!(*redacted, Part::RedactedThought("opaque".into()));
+        assert_eq!(chunks[4].content.as_ref().unwrap().text_concat(), "hi");
     }
 }

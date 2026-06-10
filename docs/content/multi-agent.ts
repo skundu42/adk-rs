@@ -14,25 +14,25 @@ export const page: DocPage = {
     { kind: 'h2', text: 'LLM-driven delegation: transfer_to_agent' },
     {
       kind: 'p',
-      text: 'A coordinator `LlmAgent` registers specialists with `.sub_agent(...)` and exposes the `transfer_to_agent` built-in tool (`adk_rs::tools::transfer_to_agent_tool()`). The model sees a function declaration with one required parameter, `agent_name`, plus the description *“Transfer control to another agent by name…”* — and calls it when a request is better handled elsewhere.',
+      text: 'A coordinator `LlmAgent` registers specialists with `.sub_agent(...)`, which auto-registers the `transfer_to_agent` built-in tool (`adk_rs::tools::transfer_to_agent_tool()`). The model sees a function declaration with one required parameter, `agent_name`, plus the description *“Transfer control to another agent by name…”* — and calls it when a request is better handled elsewhere.',
     },
     {
       kind: 'p',
-      text: 'The flow, step by step: the model emits a `FunctionCall` for `transfer_to_agent`; the tool sets `transfer_to_agent` on its `ToolContext`; after the tool-response event is yielded, the `LlmAgent` resolves the name with `find_agent` (a depth-first search over its sub-agent tree), runs the target with the **same** `InvocationContext`, and streams the target’s events as the remainder of the invocation. The coordinator does not regain control that turn.',
+      text: 'The flow, step by step: the model emits a `FunctionCall` for `transfer_to_agent`; the tool sets `transfer_to_agent` on its `ToolContext`; after the tool-response event is yielded, the `LlmAgent` resolves the name — its own subtree first (via `find_agent`), then the whole tree from `InvocationContext.root_agent` (set by the [Runner](/docs/runner)), so siblings and ancestors are reachable too; self-transfer is rejected. It then runs the target with the **same** `InvocationContext` and streams the target’s events as the remainder of the invocation. The coordinator does not regain control that turn.',
     },
     {
       kind: 'list',
       items: [
         'The target shares the session, so it sees the full conversation including the user request and the transfer call.',
-        'An unknown `agent_name` fails the run with a not-found error — names must be unique and stable within the tree.',
-        '`.disable_transfer(true)` on the builder makes the agent ignore transfer requests: the tool still responds, but control never moves.',
+        'An unknown `agent_name` does not abort the run: the model gets a recoverable tool response — `{"error": "unknown agent <name>; transfer not performed"}` — and the run continues. Names should still be unique and stable within the tree.',
+        '`.disable_transfer(true)` on the builder makes the agent ignore transfer requests — and suppresses the auto-registration of the transfer tool and the sub-agent roster in the system instruction.',
       ],
     },
     {
       kind: 'callout',
-      tone: 'warn',
-      title: 'Register the tool explicitly',
-      text: 'In v0.3.0 the transfer tool is **not** auto-injected when sub-agents are present. Add `.tool(transfer_to_agent_tool())` to the coordinator, and name the available specialists (with what they do) in its instruction so the model knows its options.',
+      tone: 'note',
+      title: 'Auto-injected tool and roster',
+      text: 'When sub-agents are declared (and transfer is not disabled), the transfer tool is auto-registered and a roster of sub-agent names and descriptions is appended to the system instruction — no manual `.tool(transfer_to_agent_tool())` or hand-written agent list needed. Manual registration is only required for transfer **without** declared sub-agents.',
     },
     { kind: 'h2', text: 'Coordinator / specialist example' },
     {
@@ -42,7 +42,6 @@ export const page: DocPage = {
       code: `use std::sync::Arc;
 use adk_rs::agents::LlmAgent;
 use adk_rs::providers::gemini::Gemini;
-use adk_rs::tools::transfer_to_agent_tool;
 
 let model = Arc::new(Gemini::from_env("gemini-2.5-flash")?);
 
@@ -62,14 +61,12 @@ let task_executor = Arc::new(
         .build()?,
 );
 
+// Declaring sub-agents auto-registers transfer_to_agent and
+// advertises each specialist's name and description to the model.
 let coordinator = LlmAgent::builder("coordinator")
     .model(model)
     .description("Routes each request to the right specialist.")
-    .instruction(
-        "Decide who should handle the request and call transfer_to_agent. \\
-         Available agents: greeter (greetings), task_executor (everything else).",
-    )
-    .tool(transfer_to_agent_tool())
+    .instruction("Route each request to the best-suited specialist.")
     .sub_agent(greeter)
     .sub_agent(task_executor)
     .build()?;`,

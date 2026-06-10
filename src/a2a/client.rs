@@ -127,8 +127,11 @@ impl RemoteA2aAgent {
                 .map_err(|e| Error::config(format!("invalid header value: {e}")))?;
             headers.insert(name, value);
         }
+        // Redirects disabled: configured headers can carry credentials and
+        // reqwest re-sends custom headers to redirect targets.
         let http = Client::builder()
             .timeout(cfg.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| Error::other(format!("A2A HTTP client: {e}")))?;
@@ -307,7 +310,9 @@ async fn fetch_agent_card(cfg: &RemoteA2aConfig, url: &str) -> Result<AgentCard>
     {
         crate::transport_security::require_secure_url(url, "RemoteA2aConfig.agent_card_url")?;
     }
-    let mut builder = reqwest::Client::builder().timeout(cfg.timeout);
+    let mut builder = reqwest::Client::builder()
+        .timeout(cfg.timeout)
+        .redirect(reqwest::redirect::Policy::none());
     builder = builder.user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")));
     let http = builder
         .build()
@@ -334,14 +339,7 @@ async fn fetch_agent_card(cfg: &RemoteA2aConfig, url: &str) -> Result<AgentCard>
     Ok(card)
 }
 
-fn header_looks_credential_bearing(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "authorization" | "cookie" | "proxy-authorization"
-    ) || lower.starts_with("x-api")
-        || lower.starts_with("x-auth")
-}
+use crate::transport_security::header_looks_credential_bearing;
 
 /// Build an A2A [`Message`] from an ADK invocation context.
 fn message_from_invocation(ctx: &InvocationContext) -> Message {

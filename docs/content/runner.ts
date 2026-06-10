@@ -69,8 +69,6 @@ export const page: DocPage = {
       rows: [
         ['`streaming_mode`', '`StreamingMode`', '`None` (default) or `Sse`. See [Streaming](/docs/streaming).'],
         ['`max_llm_calls`', '`Option<u32>`', 'Stop after this many LLM turns. `None` = unlimited (use with care). Enforced by `InvocationContext::check_and_inc_llm_call`.'],
-        ['`custom_metadata`', '`IndexMap<String, Value>`', 'Per-invocation metadata to merge into emitted events.'],
-        ['`model_override`', '`Option<String>`', 'Override the agent’s model name for this invocation.'],
         ['`context_cache_config`', '`Option<ContextCacheConfig>`', 'Explicit context caching; overrides the runner-level setting.'],
         ['`resumability`', '`Option<ResumabilityConfig>`', 'Pause/resume behaviour; overrides the runner-level setting.'],
       ],
@@ -78,7 +76,7 @@ export const page: DocPage = {
     { kind: 'h2', text: 'InvocationContext' },
     {
       kind: 'p',
-      text: 'For every invocation the runner builds an `Arc<InvocationContext>` and threads it through the agent tree, tools, callbacks, and plugins. It exposes the identity triple (`app_name`, `user_id`, `invocation_id`), the live session as `Arc<Mutex<Session>>` (so the runner and tool callbacks can both mutate state safely), all four services, the `run_config`, the original `user_content`, an LLM call counter, the shared `cancellation` token, and an `attributes` bag (`Arc<Mutex<HashMap<String, Value>>>`) used by plugins and the auth/confirmation preprocessors.',
+      text: 'For every invocation the runner builds an `Arc<InvocationContext>` and threads it through the agent tree, tools, callbacks, and plugins. It exposes the identity triple (`app_name`, `user_id`, `invocation_id`), the live session as `Arc<Mutex<Session>>` (so the runner and tool callbacks can both mutate state safely), all four services, the `run_config`, the original `user_content`, an LLM call counter, the shared `cancellation` token, an `attributes` bag (`Arc<Mutex<HashMap<String, Value>>>`) used by plugins and the auth/confirmation preprocessors, and `root_agent: Option<Arc<dyn BaseAgent>>` — set by the runner to the root of the agent tree and used by [agent transfer](/docs/multi-agent) to reach siblings and ancestors.',
     },
     {
       kind: 'api',
@@ -145,6 +143,10 @@ async fn main() -> adk_rs::Result<()> {
     }
     Ok(())
 }`,
+    },
+    {
+      kind: 'p',
+      text: 'Because the example requests `StreamingMode::Sse`, the stream contains transient `partial: Some(true)` token events before the final aggregated event of each model turn. See [Streaming](/docs/streaming).',
     },
     { kind: 'h2', text: 'Related pages' },
     {

@@ -33,6 +33,9 @@ pub(crate) struct WireRequest<'a> {
     /// Structured-output constraint (`{"format": {"type": "json_schema", ...}}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<Value>,
+    /// Extended thinking (`{"type": "enabled", "budget_tokens": N}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +75,13 @@ pub(crate) enum WireBlock {
         content: Vec<WireToolResultPart>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -151,18 +161,48 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         _ => None,
     };
 
+    // Extended thinking: the unified `thinking_config` budget maps to the
+    // Messages API `thinking` parameter. Budget `0` means explicitly
+    // disabled; `None` means model default (omit the parameter).
+    let thinking_budget = req
+        .config
+        .thinking_config
+        .as_ref()
+        .and_then(|tc| tc.thinking_budget)
+        .filter(|b| *b > 0)
+        .map(|b| b as u32);
+    let thinking =
+        thinking_budget.map(|b| serde_json::json!({ "type": "enabled", "budget_tokens": b }));
+
+    // `max_tokens` must exceed the thinking budget (thinking tokens count
+    // against it), so the *default* grows with the budget. An explicit
+    // caller value is always respected.
+    let default_max_tokens = thinking_budget.map_or(2048, |b| b + 2048);
+    // The API rejects sampling modifications alongside thinking.
+    let sampling_allowed = thinking.is_none();
+    if !sampling_allowed
+        && (req.config.temperature.is_some()
+            || req.config.top_p.is_some()
+            || req.config.top_k.is_some())
+    {
+        tracing::debug!(
+            "dropping temperature/top_p/top_k: not compatible with Anthropic extended thinking"
+        );
+    }
+
     WireRequest {
         model,
-        max_tokens: req.config.max_output_tokens.unwrap_or(2048),
+        max_tokens: req.config.max_output_tokens.unwrap_or(default_max_tokens),
         system,
         messages,
         tools,
-        temperature: req.config.temperature,
-        top_p: req.config.top_p,
-        top_k: req.config.top_k,
+        temperature: req.config.temperature.filter(|_| sampling_allowed),
+        top_p: req.config.top_p.filter(|_| sampling_allowed),
+        top_k: req.config.top_k.filter(|_| sampling_allowed),
         stop_sequences: req.config.stop_sequences.clone(),
         stream: false,
         output_config,
+        thinking,
     }
 }
 
@@ -209,8 +249,25 @@ fn content_to_blocks(c: &Content) -> (&'static str, Vec<WireBlock>) {
     let mut out = Vec::new();
     for p in &c.parts {
         match p {
-            Part::Text(t) | Part::Thought(t) if !t.is_empty() => {
+            Part::Text(t) if !t.is_empty() => {
                 out.push(WireBlock::Text { text: t.clone() });
+            }
+            // Thinking blocks must round-trip verbatim with their signature
+            // (the API validates it). An unsigned thought (e.g. produced by
+            // a different provider) can't be replayed as thinking and must
+            // NOT be downgraded to text — that would misrepresent reasoning
+            // as assistant prose — so it is skipped.
+            Part::Thought(t) => match &t.signature {
+                Some(sig) => out.push(WireBlock::Thinking {
+                    thinking: t.text.clone(),
+                    signature: sig.clone(),
+                }),
+                None => tracing::debug!(
+                    "skipping unsigned thought part (Anthropic requires signed thinking blocks)"
+                ),
+            },
+            Part::RedactedThought(data) => {
+                out.push(WireBlock::RedactedThinking { data: data.clone() })
             }
             Part::FunctionCall(fc) => out.push(WireBlock::ToolUse {
                 id: fc
@@ -255,8 +312,8 @@ fn content_to_blocks(c: &Content) -> (&'static str, Vec<WireBlock>) {
                     out.push(WireBlock::Document { source });
                 }
             }
-            // Empty text/thought parts fell through the guard above: skip.
-            Part::Text(_) | Part::Thought(_) => {}
+            // Empty text parts fell through the guard above: skip.
+            Part::Text(_) => {}
             // Anything else is dropped loudly, not silently.
             other => tracing::warn!(
                 part = %part_kind(other),
@@ -271,6 +328,7 @@ fn part_kind(p: &Part) -> &'static str {
     match p {
         Part::Text(_) => "text",
         Part::Thought(_) => "thought",
+        Part::RedactedThought(_) => "redacted_thought",
         Part::InlineData(_) => "inline_data",
         Part::FileData(_) => "file_data",
         Part::FunctionCall(_) => "function_call",
@@ -286,10 +344,20 @@ fn random_id() -> String {
 /// Anthropic response shape.
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireResponse {
-    pub content: Vec<WireResponseBlock>,
+    pub content: Vec<MaybeKnownBlock>,
     pub stop_reason: Option<String>,
     pub model: Option<String>,
     pub usage: Option<WireUsage>,
+}
+
+/// Tolerant wrapper: content blocks the crate doesn't model yet
+/// (`redacted_thinking`, `server_tool_use`, future kinds) deserialize into
+/// `Unknown` and are skipped, instead of failing the whole response.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum MaybeKnownBlock {
+    Known(WireResponseBlock),
+    Unknown(Value),
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +373,11 @@ pub(crate) enum WireResponseBlock {
     },
     Thinking {
         thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -324,27 +397,48 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
     Ok(from_wire_response(r))
 }
 
+/// Stop-reason mapping shared by the streaming and non-streaming paths.
+pub(crate) fn map_stop_reason(s: &str) -> FinishReason {
+    match s {
+        "max_tokens" => FinishReason::MaxTokens,
+        "refusal" => FinishReason::Safety,
+        // end_turn, stop_sequence, tool_use, pause_turn, future values.
+        _ => FinishReason::Stop,
+    }
+}
+
 pub(crate) fn from_wire_response(r: WireResponse) -> LlmResponse {
     let mut parts: Vec<Part> = Vec::with_capacity(r.content.len());
     for b in r.content {
         match b {
-            WireResponseBlock::Text { text } => parts.push(Part::Text(text)),
-            WireResponseBlock::Thinking { thinking } => parts.push(Part::Thought(thinking)),
-            WireResponseBlock::ToolUse { id, name, input } => {
+            MaybeKnownBlock::Known(WireResponseBlock::Text { text }) => {
+                parts.push(Part::Text(text))
+            }
+            MaybeKnownBlock::Known(WireResponseBlock::Thinking {
+                thinking,
+                signature,
+            }) => parts.push(Part::Thought(crate::genai_types::part::Thought {
+                text: thinking,
+                signature,
+            })),
+            MaybeKnownBlock::Known(WireResponseBlock::RedactedThinking { data }) => {
+                parts.push(Part::RedactedThought(data))
+            }
+            MaybeKnownBlock::Known(WireResponseBlock::ToolUse { id, name, input }) => {
                 parts.push(Part::FunctionCall(FunctionCall {
                     id: Some(id),
                     name,
                     args: input,
+                    thought_signature: None,
                 }))
+            }
+            MaybeKnownBlock::Unknown(v) => {
+                let block_type = v.get("type").and_then(Value::as_str).unwrap_or("?");
+                tracing::debug!(block_type, "skipping unrecognised anthropic content block");
             }
         }
     }
-    let finish = match r.stop_reason.as_deref() {
-        Some("end_turn") | Some("stop_sequence") => Some(FinishReason::Stop),
-        Some("max_tokens") => Some(FinishReason::MaxTokens),
-        Some("tool_use") => Some(FinishReason::Stop),
-        _ => None,
-    };
+    let finish = r.stop_reason.as_deref().map(map_stop_reason);
     let cache_read = r
         .usage
         .as_ref()
@@ -420,6 +514,126 @@ mod tests {
         });
         let r = parse_response(body.to_string().as_bytes()).unwrap();
         assert_eq!(r.content.unwrap().text_concat(), "ok");
+        assert_eq!(r.finish_reason, Some(FinishReason::Stop));
+    }
+
+    /// Regression: unknown content-block types (e.g. `server_tool_use`, or
+    /// anything the API adds later) must be skipped, not fail the whole
+    /// response.
+    #[test]
+    fn parse_response_skips_unknown_block_types() {
+        let body = json!({
+            "content": [
+                {"type": "server_tool_use", "id": "x", "name": "web_search", "input": {}},
+                {"type": "text", "text": "ok"},
+                {"type": "some_future_block", "payload": {"a": 1}}
+            ],
+            "stop_reason": "end_turn",
+            "model": "claude-x",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let r = parse_response(body.to_string().as_bytes()).unwrap();
+        let content = r.content.unwrap();
+        assert_eq!(content.text_concat(), "ok");
+        assert_eq!(content.parts.len(), 1);
+    }
+
+    /// Thinking blocks parse with their signature, and `redacted_thinking`
+    /// blocks are preserved as opaque parts — both must be replayable.
+    #[test]
+    fn parse_response_captures_thinking_signature_and_redacted() {
+        let body = json!({
+            "content": [
+                {"type": "thinking", "thinking": "Let me reason…", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque-blob"},
+                {"type": "text", "text": "answer"}
+            ],
+            "stop_reason": "end_turn"
+        });
+        let r = parse_response(body.to_string().as_bytes()).unwrap();
+        let parts = r.content.unwrap().parts;
+        assert_eq!(
+            parts[0],
+            Part::Thought(
+                crate::genai_types::Thought::new("Let me reason…").with_signature("sig-1")
+            )
+        );
+        assert_eq!(parts[1], Part::RedactedThought("opaque-blob".into()));
+        assert_eq!(parts[2], Part::Text("answer".into()));
+    }
+
+    /// `thinking_config` maps to the `thinking` request parameter; the
+    /// default `max_tokens` grows past the budget, and sampling knobs are
+    /// dropped (the API rejects them alongside thinking).
+    #[test]
+    fn thinking_config_maps_to_thinking_param() {
+        let mut req = LlmRequest::default();
+        req.contents.push(Content::user_text("hi"));
+        req.config.thinking_config = Some(crate::genai_types::ThinkingConfig {
+            thinking_budget: Some(4096),
+            include_thoughts: Some(true),
+        });
+        req.config.temperature = Some(0.3);
+        let w = serde_json::to_value(to_wire(&req, "claude-x")).unwrap();
+        assert_eq!(w["thinking"]["type"], "enabled");
+        assert_eq!(w["thinking"]["budget_tokens"], 4096);
+        assert_eq!(w["max_tokens"], 4096 + 2048);
+        assert!(w.get("temperature").is_none());
+
+        // No thinking config → no thinking param, sampling preserved.
+        let mut req = LlmRequest::default();
+        req.contents.push(Content::user_text("hi"));
+        req.config.temperature = Some(0.3);
+        let w = serde_json::to_value(to_wire(&req, "claude-x")).unwrap();
+        assert!(w.get("thinking").is_none());
+        let temp = w["temperature"].as_f64().unwrap();
+        assert!((temp - 0.3).abs() < 1e-6, "got {temp}");
+    }
+
+    /// Replayed history: signed thoughts become verbatim `thinking` blocks,
+    /// redacted thoughts become `redacted_thinking`, and unsigned thoughts
+    /// are skipped (never downgraded to assistant prose).
+    #[test]
+    fn thought_history_round_trips_as_thinking_blocks() {
+        let mut req = LlmRequest::default();
+        req.contents.push(Content {
+            role: Role::Model,
+            parts: vec![
+                Part::Thought(crate::genai_types::Thought::new("step 1").with_signature("sig-1")),
+                Part::RedactedThought("blob".into()),
+                Part::thought("unsigned — must be skipped"),
+                Part::Text("visible answer".into()),
+            ],
+        });
+        let w = serde_json::to_value(to_wire(&req, "claude-x")).unwrap();
+        let blocks = w["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "step 1");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[1]["data"], "blob");
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(blocks[2]["text"], "visible answer");
+    }
+
+    /// `refusal` maps to `Safety` on the non-streaming path too (it already
+    /// did on the streaming path); unknown stop reasons degrade to `Stop`
+    /// rather than `None`.
+    #[test]
+    fn parse_response_maps_refusal_and_unknown_stop_reasons() {
+        let body = json!({
+            "content": [{"type": "text", "text": "no"}],
+            "stop_reason": "refusal"
+        });
+        let r = parse_response(body.to_string().as_bytes()).unwrap();
+        assert_eq!(r.finish_reason, Some(FinishReason::Safety));
+
+        let body = json!({
+            "content": [{"type": "text", "text": "…"}],
+            "stop_reason": "pause_turn"
+        });
+        let r = parse_response(body.to_string().as_bytes()).unwrap();
         assert_eq!(r.finish_reason, Some(FinishReason::Stop));
     }
 

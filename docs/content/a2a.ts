@@ -86,7 +86,7 @@ serve("127.0.0.1:8080".parse()?, state).await?;`,
     { kind: 'h2', text: 'Push notifications' },
     {
       kind: 'p',
-      text: '`PushNotifier` (one per `A2aState`) delivers updates out-of-band: for each registered config it spawns a subscriber that POSTs every status / artifact update to the webhook URL. Delivery is best-effort and fire-and-forget — failures are logged, retried up to 3 times with a small backoff, and never surfaced to the inbound caller. Webhook bodies match the `message/stream` envelope (`{"jsonrpc": "2.0", "result": <update>}`), so a receiver written for SSE consumes them unchanged. A configured `token` is sent as `Authorization: Bearer <token>` on each POST, and webhook URLs must be HTTPS or loopback.',
+      text: '`PushNotifier` (one per `A2aState`) delivers updates out-of-band: for each registered config it spawns a subscriber that POSTs every status / artifact update to the webhook URL. Delivery is best-effort and fire-and-forget — failures are logged, retried with a small backoff (3 attempts total, i.e. up to 2 retries), and never surfaced to the inbound caller. Webhook bodies match the `message/stream` envelope (`{"jsonrpc": "2.0", "result": <update>}`), so a receiver written for SSE consumes them unchanged. A configured `token` is sent as `Authorization: Bearer <token>` on each POST, and webhook URLs must be HTTPS or loopback.',
     },
     { kind: 'h2', text: 'Calling a remote agent' },
     {

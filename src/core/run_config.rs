@@ -1,8 +1,6 @@
 //! Per-invocation runtime configuration.
 
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// Streaming behaviour requested by the caller.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,12 +33,6 @@ pub struct RunConfig {
     /// Stop after this many LLM turns. None = unlimited (use with care).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_llm_calls: Option<u32>,
-    /// Optional per-invocation custom metadata to merge into emitted events.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub custom_metadata: IndexMap<String, Value>,
-    /// Override agent's `model` for this invocation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_override: Option<String>,
     /// Explicit context-caching config. Usually inherited from the runner
     /// (see `Runner::builder().context_cache_config(..)`); set here to
     /// override per invocation.

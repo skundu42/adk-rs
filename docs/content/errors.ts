@@ -20,8 +20,6 @@ export const page: DocPage = {
         ['`Tool(ToolError)`', 'Tool invocation failure.'],
         ['`Service(ServiceError)`', 'Session / artifact / memory / credential backend failure.'],
         ['`Schema(SchemaError)`', 'Schema generation, sanitization, or validation failure.'],
-        ['`Invariant(&\'static str)`', 'An internal invariant that should never fail at runtime did.'],
-        ['`Cancelled`', 'The operation was cancelled. See [Cancellation & resume](/docs/cancellation-and-resume).'],
         ['`Config(String)`', 'Invalid caller-supplied configuration — also what the [security guards](/docs/security) raise.'],
         ['`NotFound(String)`', 'The requested entity does not exist.'],
         ['`AlreadyExists(String)`', 'The entity already exists.'],
@@ -119,10 +117,13 @@ while let Some(item) = events.next().await {
             // Transient server error — also retryable.
             break;
         }
-        Err(Error::Cancelled) => break,
         Err(e) => return Err(e),
     }
 }`,
+    },
+    {
+      kind: 'p',
+      text: 'Note that cancellation never surfaces as an `Err` item: a cancelled run yields a final `Ok` event whose `error_code` is `Some("CANCELLED")`, caught by the `is_error()` branch above.',
     },
     {
       kind: 'callout',
@@ -133,7 +134,7 @@ while let Some(item) = events.next().await {
     { kind: 'h2', text: 'Error-recovery callbacks' },
     {
       kind: 'p',
-      text: '`adk_rs::core` exports two error-hook callback type aliases: `OnModelErrorCallback` — `Fn(&mut CallbackContext, &mut LlmRequest, &Error) -> Future<Result<Option<LlmResponse>>>` — and `OnToolErrorCallback` — `Fn(&mut ToolContext, &Arc<dyn DynTool>, &Value, &Error) -> Future<Result<Option<Value>>>`. Per their contract, returning `Ok(Some(...))` substitutes a recovery value for the failed call. See [Callbacks & plugins](/docs/callbacks-and-plugins) for the callback system and how hooks attach to the agent lifecycle; for run-level observation of failures, `BasePlugin::after_run` receives the run’s failure as `Option<&Error>`.',
+      text: '`adk_rs::core` exports two error-hook callback type aliases: `OnModelErrorCallback` — `Fn(&mut CallbackContext, &mut LlmRequest, &Error) -> Future<Result<Option<LlmResponse>>>` — and `OnToolErrorCallback` — `Fn(&mut ToolContext, &Arc<dyn DynTool>, &Value, &Error) -> Future<Result<Option<Value>>>`. Per their contract, returning `Ok(Some(...))` substitutes a recovery value for the failed call. Register them via `LlmAgentBuilder::on_model_error_callback` and `::on_tool_error_callback` — a recovered model error never becomes an `Err` stream item; the substitute response continues the turn as if the call had succeeded. See [Callbacks & plugins](/docs/callbacks-and-plugins) for the callback system and how hooks attach to the agent lifecycle; for run-level observation of failures, `BasePlugin::after_run` receives the run’s failure as `Option<&Error>`.',
     },
     { kind: 'hr' },
     {

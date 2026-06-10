@@ -1,18 +1,13 @@
 //! Internal test helpers — a stub agent and a default `InvocationContext`.
 //! Compiled only under `#[cfg(test)]`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use parking_lot::Mutex;
 
 use crate::agents::base::BaseAgent;
-use crate::core::{
-    Event, EventActions, EventStream, GetSessionConfig, InvocationContext, InvocationOrigin,
-    ListSessionsResponse, LlmResponse, RunConfig, Session, SessionService, State,
-};
+use crate::core::{Event, EventActions, EventStream, InvocationContext, LlmResponse};
 use crate::error::Result;
 use crate::genai_types::Content;
 
@@ -60,51 +55,8 @@ impl BaseAgent for StubAgent {
     }
 }
 
-#[derive(Debug)]
-struct NoopSession;
-#[async_trait]
-impl SessionService for NoopSession {
-    async fn create_session(
-        &self,
-        app: &str,
-        user: &str,
-        _state: Option<State>,
-        id: Option<&str>,
-    ) -> Result<Session> {
-        Ok(Session::new(app, user, id.unwrap_or("s")))
-    }
-    async fn get_session(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: GetSessionConfig,
-    ) -> Result<Option<Session>> {
-        Ok(None)
-    }
-    async fn list_sessions(&self, _: &str, _: &str) -> Result<ListSessionsResponse> {
-        Ok(ListSessionsResponse::default())
-    }
-    async fn delete_session(&self, _: &str, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-}
-
 pub(crate) fn test_ctx() -> Arc<InvocationContext> {
-    Arc::new(InvocationContext {
-        app_name: "app".into(),
-        user_id: "u".into(),
-        invocation_id: "inv-1".into(),
-        session: Arc::new(Mutex::new(Session::new("app", "u", "s"))),
-        session_service: Arc::new(NoopSession),
-        artifact_service: None,
-        memory_service: None,
-        credential_service: None,
-        run_config: RunConfig::default(),
-        origin: InvocationOrigin::Api,
-        user_content: Some(Content::user_text("hi")),
-        llm_call_count: Arc::new(Mutex::new(0)),
-        cancellation: Default::default(),
-        attributes: Arc::new(Mutex::new(HashMap::new())),
-    })
+    let mut ctx = crate::core::testing::test_invocation_context();
+    ctx.user_content = Some(Content::user_text("hi"));
+    Arc::new(ctx)
 }

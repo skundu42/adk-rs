@@ -38,7 +38,8 @@ pub trait CodeExecutor: Send + Sync + std::fmt::Debug + 'static {
         false
     }
 
-    /// Maximum retries the runner is allowed per invocation before giving up.
+    /// Total number of attempts (minimum 1) the runner makes per execution
+    /// before giving up — the default of 2 means one retry.
     fn error_retry_attempts(&self) -> u32 {
         2
     }

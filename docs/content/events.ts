@@ -28,7 +28,7 @@ export const page: DocPage = {
         ['`response`', '`LlmResponse`', 'Content, usage, finish reason, error code/message — flattened into the event on the wire.'],
         ['`actions`', '`EventActions`', 'Side effects to apply on append; see below.'],
         ['`long_running_tool_ids`', '`Option<Vec<String>>`', 'Ids of long-running (or gated) tool calls — a non-empty list signals a paused invocation.'],
-        ['`partial`', '`Option<bool>`', '`Some(true)` marks a transient streaming chunk. Partial events are never persisted.'],
+        ['`partial`', '`Option<bool>`', '`Some(true)` marks a transient streaming chunk — produced by `LlmAgent` under `StreamingMode::Sse`. Partial events are never persisted.'],
         ['`turn_complete`', '`Option<bool>`', '`Some(true)` marks the event that ends a streaming turn.'],
       ],
     },
@@ -36,7 +36,7 @@ export const page: DocPage = {
     {
       kind: 'api',
       entries: [
-        { sig: 'fn Event::new(author: impl Into<String>, response: LlmResponse) -> Event', desc: 'Fresh id, current timestamp, default actions. `invocation_id` starts empty; the runner stamps it.' },
+        { sig: 'fn Event::new(author: impl Into<String>, response: LlmResponse) -> Event', desc: 'Fresh id, current timestamp, default actions. `invocation_id` starts empty; the emitting agent stamps its own events (the runner stamps only the user event it creates), so custom agents must set it themselves.' },
         { sig: 'fn Event::user_text(text: impl Into<String>) -> Event', desc: 'A `"user"`-authored event wrapping `Content::user_text(text)`.' },
         { sig: 'fn Event::model_text(author, text) -> Event', desc: 'An agent-authored event wrapping `Content::model_text(text)`.' },
         { sig: 'fn Event::new_id() -> String', desc: 'Generate a UUID event id.' },

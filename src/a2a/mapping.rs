@@ -63,7 +63,12 @@ pub fn message_to_content(msg: &Message) -> Content {
 #[must_use]
 pub fn adk_part_to_a2a(p: &AdkPart) -> A2aPart {
     match p {
-        AdkPart::Text(t) | AdkPart::Thought(t) => A2aPart::text(t.clone()),
+        AdkPart::Text(t) => A2aPart::text(t.clone()),
+        AdkPart::Thought(t) => A2aPart::text(t.text.clone()),
+        AdkPart::RedactedThought(data) => A2aPart::Data {
+            data: serde_json::json!({"adk:redactedThought": data}),
+            metadata: None,
+        },
         AdkPart::FunctionCall(fc) => A2aPart::Data {
             data: serde_json::json!({"adk:functionCall": fc}),
             metadata: None,

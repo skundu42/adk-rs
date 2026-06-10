@@ -256,6 +256,7 @@ impl Runner {
             llm_call_count: Arc::new(Mutex::new(0)),
             cancellation: cancellation.clone(),
             attributes: Arc::new(Mutex::new(HashMap::new())),
+            root_agent: Some(self.agent.clone()),
         });
 
         if let Some(user_content) = user_content {

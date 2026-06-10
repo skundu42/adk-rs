@@ -11,11 +11,11 @@ An open-source, code-first Rust framework for building, evaluating, and deployin
 ## Highlights
 
 - **Three providers, one trait** — Gemini, Anthropic Claude, and any OpenAI-compatible endpoint (Azure, Ollama, Groq) behind `Arc<dyn Model>`, with native SSE streaming, image input, automatic retry/backoff, and prompt caching on every provider.
-- **Composable agents** — `LlmAgent`, `SequentialAgent`, `ParallelAgent`, and `LoopAgent` nest through one `BaseAgent` trait, driven by a unified event stream.
+- **Composable agents** — `LlmAgent`, `SequentialAgent`, `ParallelAgent`, and `LoopAgent` nest through one `BaseAgent` trait, driven by a unified event stream, with automatic agent transfer between declared sub-agents and lifecycle callbacks around every agent, model, and tool call.
 - **Ergonomic tools** — `#[tool]` on any async function derives the schema and wiring; or mount tools from any **MCP** server or **OpenAPI 3.x** spec.
-- **Production runtime** — structured output, human-in-the-loop tool confirmation, pause/cancel/resume, context caching, event compaction, and semantic memory.
+- **Production runtime** — token-level streaming, structured output, extended thinking (Anthropic) with signature-safe round-trips, human-in-the-loop tool confirmation, pause/cancel/resume, context caching, event compaction, and semantic memory.
 - **Serve and interoperate** — an axum dev server compatible with the adk-web UI, an embeddable CLI, spec-compliant **A2A** agent-to-agent JSON-RPC, and **Gemini Live** bidirectional audio streaming.
-- **Secure by default** — HTTPS-or-loopback for credentials, loopback-only unauthenticated servers, sandboxed code execution, zero `unsafe`.
+- **Secure by default** — HTTPS-or-loopback for credentials, redirect-stripped credential clients, loopback-only unauthenticated servers, Docker-sandboxed code execution, zero `unsafe`.
 
 ## Installation
 
@@ -23,7 +23,7 @@ Default features are empty — opt in to what you need:
 
 ```toml
 [dependencies]
-adk-rs = { version = "0.5", features = ["gemini", "macros"] }
+adk-rs = { version = "0.6", features = ["gemini", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
 ```
@@ -109,7 +109,7 @@ Everything below is covered in depth at **[adk-rs.vercel.app](https://adk-rs.ver
 | Human-in-the-loop confirmation, pause & resume | [Tool confirmation](https://adk-rs.vercel.app/docs/tool-confirmation) · [Cancellation & resume](https://adk-rs.vercel.app/docs/cancellation-and-resume) |
 | Cost levers: context caching & event compaction | [Context caching](https://adk-rs.vercel.app/docs/context-caching) · [Event compaction](https://adk-rs.vercel.app/docs/event-compaction) |
 | Authenticated tools (OAuth2, service accounts) | [Auth](https://adk-rs.vercel.app/docs/auth) |
-| Sandboxed code execution (local / Docker) | [Code execution](https://adk-rs.vercel.app/docs/code-execution) |
+| Code execution (local for trusted code, Docker-sandboxed) | [Code execution](https://adk-rs.vercel.app/docs/code-execution) |
 | HTTP server (adk api_server-compatible) & CLI | [Server](https://adk-rs.vercel.app/docs/server) · [CLI](https://adk-rs.vercel.app/docs/cli) |
 | A2A protocol & Gemini Live streaming | [A2A](https://adk-rs.vercel.app/docs/a2a) · [Gemini Live](https://adk-rs.vercel.app/docs/live) |
 | Evaluation, testing & telemetry | [Eval](https://adk-rs.vercel.app/docs/eval) · [Testing](https://adk-rs.vercel.app/docs/testing) · [Telemetry](https://adk-rs.vercel.app/docs/telemetry) |

@@ -52,8 +52,8 @@ pub type BeforeAgentCallback = Arc<
     dyn for<'a> Fn(&'a mut CallbackContext) -> BoxFuture<'a, Result<Option<Content>>> + Send + Sync,
 >;
 
-/// `after_agent_callback`: return `Some(content)` to replace the agent's
-/// emitted content with the returned content.
+/// `after_agent_callback`: return `Some(content)` to append it as an
+/// additional event after the agent's final response.
 pub type AfterAgentCallback = BeforeAgentCallback;
 
 /// `before_model_callback`: optionally mutate the outgoing request or

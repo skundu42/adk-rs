@@ -113,7 +113,7 @@ cognitive_complexity = "allow"
 
 [package]
 name = "adk-rs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -135,8 +135,8 @@ workspace = true
 [features]
 default = []
 # Providers
-gemini = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
-anthropic = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
+gemini = ["dep:reqwest", "dep:eventsource-stream"]
+anthropic = ["dep:reqwest", "dep:eventsource-stream"]
 openai = ["dep:reqwest", "dep:eventsource-stream"]
 # Gemini Live API: bidirectional WebSocket streaming (text + audio).
 live = ["gemini", "dep:tokio-tungstenite"]
@@ -145,7 +145,7 @@ fs = []
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 postgres = ["dep:sqlx", "sqlx/postgres"]
 # Subsystems
-mcp = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
+mcp = ["dep:reqwest", "dep:eventsource-stream"]
 telemetry = ["dep:tracing-subscriber"]
 otel = ["telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 eval = []
@@ -153,12 +153,12 @@ server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
 cli = ["dep:clap", "telemetry", "server", "eval"]
 macros = ["dep:adk-rs-macros"]
 # Auth + tool catalog + code executors (v0.2)
-auth = ["dep:reqwest", "dep:url", "dep:oauth2", "dep:jsonwebtoken", "dep:rand"]
-openapi = ["dep:reqwest", "dep:url", "dep:openapiv3", "dep:serde_yaml"]
+auth = ["dep:reqwest", "dep:oauth2", "dep:jsonwebtoken", "dep:rand"]
+openapi = ["dep:reqwest", "dep:openapiv3", "dep:serde_yaml"]
 code-exec = []
 code-exec-docker = ["code-exec"]
 # Agent-to-Agent JSON-RPC client + server bridge.
-a2a = ["dep:reqwest", "dep:url", "dep:eventsource-stream", "dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
+a2a = ["dep:reqwest", "dep:eventsource-stream", "dep:axum", "dep:tower", "dep:tower-http", "dep:http"]
 # Test-only helpers
 testing = []
 # Convenience: everything on
@@ -194,11 +194,13 @@ parking_lot = "0.12"
 arc-swap = "1"
 globset = "0.4"
 sha2 = "0.10"
+# transport_security validates every credential-bearing URL with the same
+# WHATWG parser reqwest uses, so there is no parser differential to exploit.
+url = "2"
 
 # Provider deps (feature-gated)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"], optional = true }
 eventsource-stream = { version = "0.2", optional = true }
-url = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
 
 # Storage deps
@@ -221,7 +223,7 @@ http = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env", "wrap_help"], optional = true }
 
 # Proc-macro
-adk-rs-macros = { path = "adk-rs-macros", version = "0.3.0", optional = true }
+adk-rs-macros = { path = "adk-rs-macros", version = "0.4.0", optional = true }
 
 # Auth deps (feature = "auth")
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"], optional = true }
@@ -267,6 +269,10 @@ required-features = ["server", "testing"]
 [[test]]
 name = "macro_expansion"
 required-features = ["macros", "testing"]
+
+[[test]]
+name = "macro_trybuild"
+required-features = ["macros"]
 
 [[test]]
 name = "auth_oauth2"

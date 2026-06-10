@@ -72,6 +72,63 @@ impl Model for MockModel {
     }
 }
 
+/// No-op [`SessionService`](crate::core::SessionService) for tests that
+/// need an [`InvocationContext`](crate::core::InvocationContext) but never
+/// touch persistence.
+#[derive(Debug, Default)]
+pub struct NoopSessionService;
+
+#[async_trait]
+impl crate::core::SessionService for NoopSessionService {
+    async fn create_session(
+        &self,
+        app: &str,
+        user: &str,
+        _state: Option<crate::core::State>,
+        id: Option<&str>,
+    ) -> Result<crate::core::Session> {
+        Ok(crate::core::Session::new(app, user, id.unwrap_or("s")))
+    }
+    async fn get_session(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: crate::core::GetSessionConfig,
+    ) -> Result<Option<crate::core::Session>> {
+        Ok(None)
+    }
+    async fn list_sessions(&self, _: &str, _: &str) -> Result<crate::core::ListSessionsResponse> {
+        Ok(crate::core::ListSessionsResponse::default())
+    }
+    async fn delete_session(&self, _: &str, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Minimal [`InvocationContext`](crate::core::InvocationContext) backed by
+/// [`NoopSessionService`], for driving tools/agents in tests. Mutate the
+/// returned value to attach services or user content.
+pub fn test_invocation_context() -> crate::core::InvocationContext {
+    crate::core::InvocationContext {
+        app_name: "app".into(),
+        user_id: "u".into(),
+        invocation_id: "inv-1".into(),
+        session: Arc::new(Mutex::new(crate::core::Session::new("app", "u", "s"))),
+        session_service: Arc::new(NoopSessionService),
+        artifact_service: None,
+        memory_service: None,
+        credential_service: None,
+        run_config: Default::default(),
+        origin: Default::default(),
+        user_content: None,
+        llm_call_count: Arc::new(Mutex::new(0)),
+        cancellation: Default::default(),
+        attributes: Arc::new(Mutex::new(Default::default())),
+        root_agent: None,
+    }
+}
+
 /// Deterministic, offline [`Embedder`](crate::core::Embedder): a hashed
 /// bag-of-words vector. Texts sharing words get high cosine similarity —
 /// crude, but stable and dependency-free, which is exactly what tests want.

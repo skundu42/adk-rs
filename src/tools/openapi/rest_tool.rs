@@ -38,10 +38,20 @@ impl RestApiTool {
     /// operations.
     #[must_use]
     pub fn new(op: ParsedOperation, auth_config: Option<AuthConfig>) -> Self {
+        // Redirects disabled: the request can carry resolved credentials
+        // (bearer/api-key headers, cookies) and reqwest re-sends custom
+        // headers to redirect targets — including plaintext ones.
+        // Panic mirrors `reqwest::Client::new()`, which this replaces; a
+        // silent fallback would re-enable redirect following.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
             op,
             auth_config,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 

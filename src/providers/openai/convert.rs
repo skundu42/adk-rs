@@ -69,7 +69,7 @@ fn user_content(c: &Content) -> Value {
     let mut parts: Vec<Value> = Vec::new();
     for p in &c.parts {
         match p {
-            Part::Text(t) | Part::Thought(t) if !t.is_empty() => {
+            Part::Text(t) if !t.is_empty() => {
                 parts.push(serde_json::json!({ "type": "text", "text": t }));
             }
             Part::InlineData(d) if d.mime_type.starts_with("image/") => {
@@ -86,7 +86,7 @@ fn user_content(c: &Content) -> Value {
                     "image_url": { "url": f.file_uri },
                 }));
             }
-            Part::Text(_) | Part::Thought(_) => {}
+            Part::Text(_) | Part::Thought(_) | Part::RedactedThought(_) => {}
             other => tracing::warn!(
                 part = ?std::mem::discriminant(other),
                 "dropping part unsupported by the chat/completions API"
@@ -152,7 +152,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
                 let mut tcs: Vec<WireToolCall> = Vec::new();
                 for p in &c.parts {
                     match p {
-                        Part::Text(t) | Part::Thought(t) => {
+                        Part::Text(t) => {
                             if !text.is_empty() {
                                 text.push('\n');
                             }
@@ -357,6 +357,7 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<LlmResponse> {
                 id: Some(tc.id),
                 name: tc.function.name,
                 args,
+                thought_signature: None,
             }));
         }
         match choice.finish_reason.as_deref() {

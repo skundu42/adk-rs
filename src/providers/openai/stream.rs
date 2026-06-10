@@ -119,6 +119,7 @@ pub(crate) fn from_sse(resp: reqwest::Response) -> LlmResponseStream {
                     id: Some(acc.id),
                     name: acc.name,
                     args,
+                    thought_signature: None,
                 })
             })
             .collect();

@@ -25,7 +25,9 @@ pub struct OpenAiConfig {
     pub api_version: Option<String>,
     /// Optional org id (`OpenAI-Organization` header).
     pub organization: Option<String>,
-    /// HTTP timeout.
+    /// Total timeout for non-streaming requests. Streaming requests are
+    /// exempt (an SSE body lasts as long as the generation does); only the
+    /// connect timeout applies to them.
     pub timeout: Duration,
     /// Retry policy for transient failures (429 / 5xx / connect errors).
     pub retry: RetryConfig,
@@ -56,8 +58,13 @@ impl OpenAi {
     /// Construct.
     pub fn new(model_name: impl Into<String>, cfg: OpenAiConfig) -> Result<Self> {
         crate::transport_security::require_secure_url(&cfg.base_url, "OpenAiConfig.base_url")?;
+        // No client-wide total timeout: it would also cap streaming bodies,
+        // killing any SSE generation longer than the timeout. Unary calls
+        // apply `cfg.timeout` per-request instead. Redirects are disabled
+        // so the bearer token can't be re-sent to a redirect target.
         let http = Client::builder()
-            .timeout(cfg.timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("adk-rs/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
@@ -123,6 +130,7 @@ impl Model for OpenAi {
             let mut rb = self
                 .http
                 .post(self.endpoint())
+                .timeout(self.cfg.timeout)
                 .header("authorization", format!("Bearer {}", self.cfg.api_key))
                 .header("content-type", "application/json");
             if let Some(org) = &self.cfg.organization {

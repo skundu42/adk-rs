@@ -40,7 +40,7 @@ export const page: DocPage = {
     { kind: 'h3', text: 'Resumability checkpoints' },
     {
       kind: 'p',
-      text: 'With `Runner::builder().resumable(true)`, the sequence emits a checkpoint event after each completed child — an event whose `actions.agent_state` records `{"completed_sub_agents": n}`. When the same invocation is later continued with `Runner::resume`, the sequence reads the latest checkpoint for its `invocation_id` and skips the children that already finished, re-entering exactly where it paused. See [Cancellation & resume](/docs/cancellation-and-resume).',
+      text: 'With `Runner::builder().resumable(true)`, the sequence emits a checkpoint event after each completed child except the last — an event whose `actions.agent_state` records `{"completed_sub_agents": n}`. When the same invocation is later continued with `Runner::resume`, the sequence reads the latest checkpoint for its `invocation_id` and skips the children that already finished, re-entering exactly where it paused. See [Cancellation & resume](/docs/cancellation-and-resume).',
     },
     { kind: 'h2', text: 'ParallelAgent' },
     {

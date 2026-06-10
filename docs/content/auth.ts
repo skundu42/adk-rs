@@ -98,7 +98,7 @@ export const page: DocPage = {
     },
     {
       kind: 'p',
-      text: 'For driving the browser leg yourself, `CredentialManager` exposes a hardened two-step API: `begin_consent(&credentials)` generates the authorization URL with a fresh PKCE S256 challenge and CSRF state (persisting both, keyed by an opaque `flow_id`), and `complete_consent(app, user, flow_id, callback_state, callback_code, &credentials)` validates the state in constant time, exchanges the code with the stored verifier, caches the result under the regular key, and deletes the single-use pending entry. `AuthHandler` underneath also rejects non-HTTPS token endpoints.',
+      text: 'For driving the browser leg yourself, `CredentialManager` exposes a hardened two-step API: `begin_consent(&credentials)` generates the authorization URL with a fresh PKCE S256 challenge and CSRF state (persisting both, keyed by an opaque `flow_id`), and `complete_consent(app, user, flow_id, callback_state, callback_code, &credentials)` validates the state in constant time, exchanges the code with the stored verifier, caches the result under the regular key, and deletes the single-use pending entry. `AuthHandler` underneath also rejects token endpoints that are neither `https://` nor loopback — validation delegates to the crate-wide [transport-security](/docs/security) policy, and loopback `http://` stays available for local testing.',
     },
     { kind: 'h2', text: 'Worked example: API key' },
     {

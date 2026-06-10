@@ -31,7 +31,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-adk-rs = { version = "0.3", features = ["gemini", "macros"] }
+adk-rs = { version = "0.6", features = ["gemini", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

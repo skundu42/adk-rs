@@ -7,13 +7,8 @@
 use std::sync::Arc;
 
 use adk_rs::Tool;
-use adk_rs::core::{
-    GetSessionConfig, InvocationContext, InvocationOrigin, ListSessionsResponse, RunConfig,
-    Session, SessionService, State, ToolContext,
-};
+use adk_rs::core::ToolContext;
 use adk_rs::tool;
-use async_trait::async_trait;
-use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,54 +30,8 @@ async fn echo(args: EchoArgs, _ctx: &mut ToolContext) -> adk_rs::Result<EchoOut>
     Ok(EchoOut { echoed: args.msg })
 }
 
-#[derive(Debug)]
-struct NoopSession;
-#[async_trait]
-impl SessionService for NoopSession {
-    async fn create_session(
-        &self,
-        app: &str,
-        user: &str,
-        _: Option<State>,
-        id: Option<&str>,
-    ) -> adk_rs::Result<Session> {
-        Ok(Session::new(app, user, id.unwrap_or("s")))
-    }
-    async fn get_session(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: GetSessionConfig,
-    ) -> adk_rs::Result<Option<Session>> {
-        Ok(None)
-    }
-    async fn list_sessions(&self, _: &str, _: &str) -> adk_rs::Result<ListSessionsResponse> {
-        Ok(ListSessionsResponse::default())
-    }
-    async fn delete_session(&self, _: &str, _: &str, _: &str) -> adk_rs::Result<()> {
-        Ok(())
-    }
-}
-
 fn ctx() -> ToolContext {
-    let inv = Arc::new(InvocationContext {
-        app_name: "app".into(),
-        user_id: "u".into(),
-        invocation_id: "inv".into(),
-        session: Arc::new(Mutex::new(Session::new("app", "u", "s"))),
-        session_service: Arc::new(NoopSession),
-        artifact_service: None,
-        memory_service: None,
-        credential_service: None,
-        run_config: RunConfig::default(),
-        origin: InvocationOrigin::Api,
-        user_content: None,
-        llm_call_count: Arc::new(Mutex::new(0)),
-        cancellation: Default::default(),
-        attributes: Arc::new(Mutex::new(std::collections::HashMap::new())),
-    });
-    ToolContext::new(inv)
+    ToolContext::new(Arc::new(adk_rs::core::testing::test_invocation_context()))
 }
 
 #[tokio::test]

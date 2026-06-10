@@ -17,7 +17,7 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.5", features = ["live"] }  # implies "gemini"`,
+adk-rs = { version = "0.6", features = ["live"] }  # implies "gemini"`,
     },
     {
       kind: 'p',
