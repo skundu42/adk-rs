@@ -932,7 +932,7 @@ mod tests {
 
     fn confirm_tool(
         name: &str,
-        executed: Arc<std::sync::atomic::AtomicBool>,
+        executed: Arc<std::sync::atomic::AtomicUsize>,
     ) -> crate::tools::FunctionTool {
         crate::tools::FunctionTool::from_async(
             name,
@@ -941,7 +941,7 @@ mod tests {
             move |_args: serde_json::Value, _ctx: &mut crate::core::ToolContext| {
                 let executed = executed.clone();
                 async move {
-                    executed.store(true, Ordering::SeqCst);
+                    executed.fetch_add(1, Ordering::SeqCst);
                     Ok(serde_json::json!({"ok": true}))
                 }
             },
@@ -981,7 +981,7 @@ mod tests {
         let m = Arc::new(MockModel::new("mock-1"));
         m.push_response(call_tool_response("transfer_money", "call-1"));
         m.push_text("transfer complete");
-        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         let runner = Runner::builder()
             .app_name("bank")
@@ -1006,7 +1006,7 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert!(!executed.load(Ordering::SeqCst), "tool ran without approval");
+        assert_eq!(executed.load(Ordering::SeqCst), 0, "tool ran without approval");
         let pending = events
             .iter()
             .flat_map(Event::function_responses)
@@ -1048,7 +1048,7 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert!(executed.load(Ordering::SeqCst), "approved tool did not run");
+        assert_eq!(executed.load(Ordering::SeqCst), 1, "approved tool must run exactly once");
         assert!(events.iter().any(|e| {
             e.function_responses()
                 .iter()
@@ -1066,7 +1066,7 @@ mod tests {
         let m = Arc::new(MockModel::new("mock-1"));
         m.push_response(call_tool_response("transfer_money", "call-2"));
         m.push_text("understood, cancelled");
-        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         let runner = Runner::builder()
             .app_name("bank")
@@ -1104,7 +1104,7 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert!(!executed.load(Ordering::SeqCst), "denied tool must not run");
+        assert_eq!(executed.load(Ordering::SeqCst), 0, "denied tool must not run");
         assert!(events.iter().any(|e| {
             e.function_responses().iter().any(|fr| {
                 fr.name == "transfer_money"
@@ -1124,7 +1124,7 @@ mod tests {
         let m2 = Arc::new(MockModel::new("mock-2"));
         m2.push_response(call_tool_response("deploy", "call-9"));
         m2.push_text("deployed");
-        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let first = Arc::new(
             LlmAgent::builder("first")
@@ -1168,7 +1168,7 @@ mod tests {
                 .any(|e| e.long_running_tool_ids.as_ref().is_some_and(|v| !v.is_empty())),
             "pipeline should pause on the confirmation gate"
         );
-        assert!(!executed.load(Ordering::SeqCst));
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
 
         // Resume in place with the approval. Step one must NOT re-run (its
         // mock model has no queued responses left, so a re-run would error).
@@ -1193,7 +1193,7 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert!(executed.load(Ordering::SeqCst), "approved tool ran on resume");
+        assert_eq!(executed.load(Ordering::SeqCst), 1, "approved tool ran exactly once on resume");
         assert!(events.iter().any(|e| {
             e.response
                 .content
@@ -1202,6 +1202,262 @@ mod tests {
         }));
         // The first step's model was called exactly once across both runs.
         assert_eq!(m1.captured_requests().len(), 1);
+    }
+
+    /// Regression (P0): a confirmed call must be replayed exactly once even
+    /// when a LATER agent in the pipeline registers a tool with the same
+    /// name. Before the fix, `confirmation.responses` was never consumed and
+    /// replay wasn't author-scoped, so agent[2] re-executed the
+    /// user-confirmed action a second time.
+    #[tokio::test]
+    async fn confirmed_call_replays_once_despite_same_named_tool_downstream() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-7"));
+        m2.push_text("second done");
+        let m3 = Arc::new(MockModel::new("mock-3"));
+        m3.push_text("third done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        // Same tool NAME registered on the downstream agent.
+        let third = Arc::new(
+            LlmAgent::builder("third")
+                .model(m3.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        let pipeline = Arc::new(
+            SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap(),
+        );
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .resumable(true)
+            .build()
+            .unwrap();
+
+        let handle = runner
+            .start("u", None, Content::user_text("go"), RunConfig::default())
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        handle.events.collect::<Vec<_>>().await;
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let resumed = runner
+            .resume(
+                "u",
+                &sid,
+                &inv_id,
+                Some(confirmation_reply("call-7", true)),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        let events: Vec<Event> = resumed
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "confirmed tool must execute exactly once, not once per same-named registration"
+        );
+        assert!(
+            events.iter().any(|e| {
+                e.response
+                    .content
+                    .as_ref()
+                    .is_some_and(|c| c.text_concat() == "third done")
+            }),
+            "pipeline must run through to the last agent"
+        );
+    }
+
+    /// Regression (P0): when the agent AFTER the paused one does NOT have
+    /// the confirmed tool, resume must still complete the pipeline. Before
+    /// the fix, the stale resume attribute made agent[2]'s replay fail with
+    /// `ToolError::Unknown`, killing the run after a successful approval.
+    #[tokio::test]
+    async fn resume_completes_when_later_agent_lacks_the_confirmed_tool() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-8"));
+        m2.push_text("second done");
+        let m3 = Arc::new(MockModel::new("mock-3"));
+        m3.push_text("third done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        // No tools at all on the downstream agent.
+        let third = Arc::new(
+            LlmAgent::builder("third")
+                .model(m3.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let pipeline = Arc::new(
+            SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap(),
+        );
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .resumable(true)
+            .build()
+            .unwrap();
+
+        let handle = runner
+            .start("u", None, Content::user_text("go"), RunConfig::default())
+            .await
+            .unwrap();
+        let inv_id = handle.invocation_id.clone();
+        handle.events.collect::<Vec<_>>().await;
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let resumed = runner
+            .resume(
+                "u",
+                &sid,
+                &inv_id,
+                Some(confirmation_reply("call-8", true)),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap();
+        let events: Vec<Event> = resumed
+            .events
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .expect("resume must not fail with an unknown-tool error on downstream agents");
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| {
+            e.response
+                .content
+                .as_ref()
+                .is_some_and(|c| c.text_concat() == "third done")
+        }));
+    }
+
+    /// Regression (P0, author-scoping): in a NON-resumable flow the whole
+    /// pipeline re-runs on the confirmation turn, so agents BEFORE the
+    /// owner run first. They must skip the pending call (they didn't author
+    /// it) instead of failing with `ToolError::Unknown`, and the entry must
+    /// survive until the owning agent replays it.
+    #[tokio::test]
+    async fn confirmation_turn_skips_agents_that_do_not_own_the_call() {
+        use crate::agents::SequentialAgent;
+
+        let m1 = Arc::new(MockModel::new("mock-1"));
+        m1.push_text("step one");
+        m1.push_text("step one again");
+        let m2 = Arc::new(MockModel::new("mock-2"));
+        m2.push_response(call_tool_response("deploy", "call-9"));
+        m2.push_text("second done");
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = Arc::new(
+            LlmAgent::builder("first")
+                .model(m1.clone() as Arc<dyn Model>)
+                .build()
+                .unwrap(),
+        );
+        let second = Arc::new(
+            LlmAgent::builder("second")
+                .model(m2.clone() as Arc<dyn Model>)
+                .tool(Arc::new(confirm_tool("deploy", executed.clone())))
+                .build()
+                .unwrap(),
+        );
+        let pipeline =
+            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
+        let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        // NOT resumable: the confirmation arrives on a fresh invocation via
+        // run_with, and the pipeline restarts from the first agent.
+        let runner = Runner::builder()
+            .app_name("ops")
+            .agent(pipeline)
+            .session_service(svc.clone())
+            .build()
+            .unwrap();
+
+        runner
+            .run("u", None, "go")
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+
+        let sid = svc.list_sessions("ops", "u").await.unwrap().sessions[0]
+            .id
+            .clone();
+        let events: Vec<Event> = runner
+            .run_with(
+                "u",
+                Some(&sid),
+                confirmation_reply("call-9", true),
+                RunConfig::default(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_>>()
+            .expect("first agent must not fail replaying a call it doesn't own");
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(|e| {
+            e.response
+                .content
+                .as_ref()
+                .is_some_and(|c| c.text_concat() == "second done")
+        }));
     }
 
     #[cfg(feature = "auth")]

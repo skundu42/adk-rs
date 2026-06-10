@@ -148,7 +148,7 @@ impl BaseAgent for LlmAgent {
                 req.contents.push(Content::user_text(text));
             }
 
-            let replayed_responses = replay_resumed_tool_calls(&ctx2, &req).await?;
+            let replayed_responses = replay_resumed_tool_calls(&ctx2, &req, &me.name).await?;
             if !replayed_responses.is_empty() {
                 let replay_event = function_response_event(
                     &me.name,
@@ -633,6 +633,7 @@ fn function_response_event(
 async fn replay_resumed_tool_calls(
     ctx: &Arc<InvocationContext>,
     req: &LlmRequest,
+    agent_name: &str,
 ) -> Result<Vec<FunctionResponse>> {
     let ids = resumed_tool_call_ids(ctx);
     if ids.is_empty() {
@@ -641,22 +642,39 @@ async fn replay_resumed_tool_calls(
 
     let events = ctx.session.lock().events.clone();
     let mut responses = Vec::new();
+    let mut consumed: Vec<String> = Vec::new();
     for id in ids {
+        // Replay is scoped to the agent that owns the pending call: the
+        // event that carried the original FunctionCall was authored by it.
+        // Ids owned by other agents in the tree are left untouched for
+        // their owners to replay.
         let Some(fc) = events
             .iter()
+            .filter(|e| e.author == agent_name)
             .flat_map(Event::function_calls)
             .find(|fc| fc.id.as_deref() == Some(id.as_str()))
         else {
             continue;
         };
-        let tool = req
-            .tools_dict
-            .get(&fc.name)
-            .cloned()
-            .ok_or_else(|| Error::from(crate::error::ToolError::Unknown(fc.name.clone())))?;
+        let Some(tool) = req.tools_dict.get(&fc.name).cloned() else {
+            // The owning agent no longer has the tool (registry changed
+            // between pause and resume). Skip rather than fail the whole
+            // run; the model proceeds without the replayed result.
+            tracing::warn!(
+                tool = %fc.name,
+                call_id = %id,
+                "resumed tool call references a tool this agent no longer registers; skipping replay"
+            );
+            continue;
+        };
         let mut tctx = ToolContext::new(ctx.clone());
         tctx.function_call_id = fc.id.clone();
         let outcome = dispatch_tool_call(tool.as_ref(), &fc, &mut tctx).await?;
+        // Consume the id so later agents in this invocation (or later
+        // iterations of this one under LoopAgent) don't replay it again —
+        // without this, a user-confirmed tool would execute once per
+        // same-named registration downstream.
+        consumed.push(id);
         let pending_name = outcome.pending_response_name();
         let value = match outcome {
             ToolDispatch::Completed(v)
@@ -673,7 +691,29 @@ async fn replay_resumed_tool_calls(
             scheduling: None,
         });
     }
+    consume_resumed_ids(ctx, &consumed);
     Ok(responses)
+}
+
+/// Remove replayed call ids from the invocation-wide resume attributes
+/// (`auth.resumed_tool_call_ids`, `confirmation.responses`) so they are
+/// replayed exactly once per invocation.
+fn consume_resumed_ids(ctx: &InvocationContext, consumed: &[String]) {
+    if consumed.is_empty() {
+        return;
+    }
+    let mut attrs = ctx.attributes.lock();
+    if let Some(v) = attrs.get_mut("auth.resumed_tool_call_ids") {
+        if let Ok(mut ids) = serde_json::from_value::<Vec<String>>(v.clone()) {
+            ids.retain(|id| !consumed.iter().any(|c| c == id));
+            *v = serde_json::to_value(ids).unwrap_or(serde_json::Value::Null);
+        }
+    }
+    if let Some(serde_json::Value::Object(map)) = attrs.get_mut("confirmation.responses") {
+        for id in consumed {
+            map.remove(id);
+        }
+    }
 }
 
 /// Function-call ids unblocked by the current user event: auth consents
