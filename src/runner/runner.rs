@@ -776,7 +776,9 @@ mod tests {
             .expect("compaction event appended after the second invocation");
         let c = comp.actions.compaction.as_ref().unwrap();
         assert!(
-            c.compacted_content.text_concat().contains("compact summary"),
+            c.compacted_content
+                .text_concat()
+                .contains("compact summary"),
             "summary content: {}",
             c.compacted_content.text_concat()
         );
@@ -784,9 +786,7 @@ mod tests {
         let history = crate::core::history_with_compaction(&sess.events);
         let texts: Vec<String> = history.iter().map(|c| c.text_concat()).collect();
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("compact summary")),
+            texts.iter().any(|t| t.contains("compact summary")),
             "history should include the summary: {texts:?}"
         );
         assert!(
@@ -1006,7 +1006,11 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(executed.load(Ordering::SeqCst), 0, "tool ran without approval");
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "tool ran without approval"
+        );
         let pending = events
             .iter()
             .flat_map(Event::function_responses)
@@ -1048,7 +1052,11 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(executed.load(Ordering::SeqCst), 1, "approved tool must run exactly once");
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "approved tool must run exactly once"
+        );
         assert!(events.iter().any(|e| {
             e.function_responses()
                 .iter()
@@ -1104,7 +1112,11 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(executed.load(Ordering::SeqCst), 0, "denied tool must not run");
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            0,
+            "denied tool must not run"
+        );
         assert!(events.iter().any(|e| {
             e.function_responses().iter().any(|fr| {
                 fr.name == "transfer_money"
@@ -1139,8 +1151,7 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let pipeline =
-            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
+        let pipeline = Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         let runner = Runner::builder()
             .app_name("ops")
@@ -1151,7 +1162,12 @@ mod tests {
             .unwrap();
 
         let handle = runner
-            .start("u", None, Content::user_text("ship it"), RunConfig::default())
+            .start(
+                "u",
+                None,
+                Content::user_text("ship it"),
+                RunConfig::default(),
+            )
             .await
             .unwrap();
         let inv_id = handle.invocation_id.clone();
@@ -1163,9 +1179,10 @@ mod tests {
             .collect::<Result<_>>()
             .unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| e.long_running_tool_ids.as_ref().is_some_and(|v| !v.is_empty())),
+            events.iter().any(|e| e
+                .long_running_tool_ids
+                .as_ref()
+                .is_some_and(|v| !v.is_empty())),
             "pipeline should pause on the confirmation gate"
         );
         assert_eq!(executed.load(Ordering::SeqCst), 0);
@@ -1193,7 +1210,11 @@ mod tests {
             .into_iter()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(executed.load(Ordering::SeqCst), 1, "approved tool ran exactly once on resume");
+        assert_eq!(
+            executed.load(Ordering::SeqCst),
+            1,
+            "approved tool ran exactly once on resume"
+        );
         assert!(events.iter().any(|e| {
             e.response
                 .content
@@ -1243,9 +1264,8 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let pipeline = Arc::new(
-            SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap(),
-        );
+        let pipeline =
+            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap());
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         let runner = Runner::builder()
             .app_name("ops")
@@ -1336,9 +1356,8 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let pipeline = Arc::new(
-            SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap(),
-        );
+        let pipeline =
+            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second, third]).unwrap());
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         let runner = Runner::builder()
             .app_name("ops")
@@ -1414,8 +1433,7 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let pipeline =
-            Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
+        let pipeline = Arc::new(SequentialAgent::new("pipeline", "", vec![first, second]).unwrap());
         let svc: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
         // NOT resumable: the confirmation arrives on a fresh invocation via
         // run_with, and the pipeline restarts from the first agent.

@@ -262,9 +262,9 @@ impl Gemini {
     /// Drop the cache entry that produced `cache_name` (e.g. after the
     /// server rejected it) so the next call re-creates it.
     fn invalidate_cache_entry(&self, cache_name: &str) {
-        self.caches.lock().retain(|_, slot| {
-            !matches!(slot, CacheSlot::Active { name, .. } if name == cache_name)
-        });
+        self.caches.lock().retain(
+            |_, slot| !matches!(slot, CacheSlot::Active { name, .. } if name == cache_name),
+        );
     }
 
     /// Serialize `req` to a wire body, consulting the explicit cache when a
@@ -454,8 +454,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1beta/cachedContents"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"name": "cachedContents/abc123"})),
+                ResponseTemplate::new(200).set_body_json(json!({"name": "cachedContents/abc123"})),
             )
             .expect(1)
             .mount(&server)

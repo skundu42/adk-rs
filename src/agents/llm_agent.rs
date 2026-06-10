@@ -512,9 +512,7 @@ async fn build_request(
 /// injection and read state themselves).
 async fn resolve_instruction(i: &Instruction, ctx: &ReadonlyContext) -> Result<String> {
     match i {
-        Instruction::Static(s) => {
-            crate::agents::instructions::inject_session_state(s, ctx).await
-        }
+        Instruction::Static(s) => crate::agents::instructions::inject_session_state(s, ctx).await,
         Instruction::Dynamic(f) => f(ctx).await,
     }
 }
@@ -773,9 +771,7 @@ impl ToolDispatch {
     fn pending_response_name(&self) -> Option<&'static str> {
         match self {
             Self::Completed(_) => None,
-            Self::ConfirmationPending(..) => {
-                Some(crate::core::REQUEST_CONFIRMATION_FUNCTION_NAME)
-            }
+            Self::ConfirmationPending(..) => Some(crate::core::REQUEST_CONFIRMATION_FUNCTION_NAME),
             Self::AuthPending(_) => Some(crate::auth::REQUEST_CREDENTIAL_FUNCTION_NAME),
         }
     }

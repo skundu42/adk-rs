@@ -91,9 +91,8 @@ impl Toolset for McpToolset {
             .into_iter()
             .map(|d| {
                 let confirm = self.confirmation.applies_to(&d.name);
-                Arc::new(
-                    McpTool::new(d, self.client.clone()).with_require_confirmation(confirm),
-                ) as Arc<dyn DynTool>
+                Arc::new(McpTool::new(d, self.client.clone()).with_require_confirmation(confirm))
+                    as Arc<dyn DynTool>
             })
             .collect();
         let _ = self.cached.set(tools.clone());

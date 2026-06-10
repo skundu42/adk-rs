@@ -188,7 +188,11 @@ pub(crate) fn compaction_window(
     overlap.reverse();
     let mut window = overlap;
     window.extend(tail.iter().cloned());
-    if window.is_empty() { None } else { Some(window) }
+    if window.is_empty() {
+        None
+    } else {
+        Some(window)
+    }
 }
 
 /// Build the compaction marker event for a summarized `window`.
@@ -253,7 +257,10 @@ mod tests {
         let s = LlmEventSummarizer::new(model.clone());
         let events = vec![ev("i1", "hello", 1.0)];
         let c = s.summarize(&events).await.unwrap().unwrap();
-        assert_eq!(c.text_concat(), "[Summary of earlier conversation] the gist");
+        assert_eq!(
+            c.text_concat(),
+            "[Summary of earlier conversation] the gist"
+        );
         // The transcript reached the model.
         let reqs = model.captured_requests();
         assert!(reqs[0].contents[0].text_concat().contains("a: hello"));

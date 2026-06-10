@@ -346,7 +346,12 @@ async fn start_run(
     let app = runner.app_name().to_string();
     let svc = runner.session_service();
     let mut session = svc
-        .get_session(&app, &req.user_id, &req.session_id, GetSessionConfig::default())
+        .get_session(
+            &app,
+            &req.user_id,
+            &req.session_id,
+            GetSessionConfig::default(),
+        )
         .await
         .map_err(internal)?
         .ok_or_else(|| {
@@ -476,12 +481,10 @@ fn sse_frames_for_event(e: &Event) -> Vec<String> {
 fn artifact_service(
     runner: &Arc<Runner>,
 ) -> Result<Arc<dyn crate::core::ArtifactService>, (StatusCode, Json<Value>)> {
-    runner.artifact_service().cloned().ok_or_else(|| {
-        detail(
-            StatusCode::NOT_FOUND,
-            "Artifact service is not configured",
-        )
-    })
+    runner
+        .artifact_service()
+        .cloned()
+        .ok_or_else(|| detail(StatusCode::NOT_FOUND, "Artifact service is not configured"))
 }
 
 fn artifact_key(app: &str, user: &str, session: &str, name: &str) -> crate::core::ArtifactKey {

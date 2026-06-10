@@ -31,12 +31,12 @@ pub use crate::error::{
 };
 pub use crate::genai_types as types;
 pub use artifact::{Artifact, ArtifactKey};
+pub use cache::{CacheMetadata, ContextCacheConfig};
 pub use callback::{
     AfterAgentCallback, AfterModelCallback, AfterToolCallback, BeforeAgentCallback,
     BeforeModelCallback, BeforeToolCallback, CallbackContext, OnModelErrorCallback,
     OnToolErrorCallback, ReadonlyContext,
 };
-pub use cache::{CacheMetadata, ContextCacheConfig};
 pub use cancel::CancellationToken;
 pub use context::{InvocationContext, InvocationOrigin, ToolContext};
 pub use event::{Event, EventActions, EventCompaction, history_with_compaction};

@@ -198,7 +198,10 @@ mod tests {
         assert_eq!(w["author"], "root_agent");
         assert_eq!(w["content"]["role"], "model");
         assert_eq!(w["content"]["parts"][0]["text"], "Hi");
-        assert_eq!(w["content"]["parts"][1]["functionCall"]["name"], "get_weather");
+        assert_eq!(
+            w["content"]["parts"][1]["functionCall"]["name"],
+            "get_weather"
+        );
         assert_eq!(w["actions"]["transferToAgent"], "sub");
         assert_eq!(w["actions"]["stateDelta"]["user:pref"], "dark");
         // Always-present maps.
@@ -228,9 +231,6 @@ mod tests {
         let w = event_to_wire(&e);
         let back = event_from_wire(&w).unwrap();
         assert_eq!(back.id, e.id);
-        assert_eq!(
-            back.response.content.as_ref().unwrap().text_concat(),
-            "hi"
-        );
+        assert_eq!(back.response.content.as_ref().unwrap().text_concat(), "hi");
     }
 }

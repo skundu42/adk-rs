@@ -31,7 +31,10 @@ pub async fn inject_session_state(template: &str, ctx: &ReadonlyContext) -> Resu
             .find(['{', '}'])
             .unwrap_or(after.len() - open_len);
         let close_start = open_len + body_len;
-        let close_len = after[close_start..].chars().take_while(|&c| c == '}').count();
+        let close_len = after[close_start..]
+            .chars()
+            .take_while(|&c| c == '}')
+            .count();
 
         if close_len == 0 {
             // Unterminated (next char is `{` or end of string): emit what we
@@ -103,9 +106,7 @@ fn is_valid_state_name(name: &str) -> bool {
         chars.all(|c| c.is_alphanumeric() || c == '_')
     }
     match name.split_once(':') {
-        Some((prefix, rest)) => {
-            matches!(prefix, "app" | "user" | "temp") && is_identifier(rest)
-        }
+        Some((prefix, rest)) => matches!(prefix, "app" | "user" | "temp") && is_identifier(rest),
         None => is_identifier(name),
     }
 }
@@ -140,11 +141,8 @@ mod tests {
 
     fn ctx_with_state(entries: &[(&str, serde_json::Value)]) -> ReadonlyContext {
         let mut session = Session::new("app", "u", "s");
-        session.state = State::from_iter(
-            entries
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), v.clone())),
-        );
+        session.state =
+            State::from_iter(entries.iter().map(|(k, v)| ((*k).to_string(), v.clone())));
         ReadonlyContext::new(Arc::new(InvocationContext {
             app_name: "app".into(),
             user_id: "u".into(),
@@ -182,7 +180,9 @@ mod tests {
     #[tokio::test]
     async fn required_missing_key_errors() {
         let ctx = ctx_with_state(&[]);
-        let err = inject_session_state("Hello {name}!", &ctx).await.unwrap_err();
+        let err = inject_session_state("Hello {name}!", &ctx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("name"));
     }
 
@@ -197,14 +197,18 @@ mod tests {
     #[tokio::test]
     async fn prefixed_keys_resolve() {
         let ctx = ctx_with_state(&[("user:tier", json!("pro"))]);
-        let s = inject_session_state("Tier: {user:tier}", &ctx).await.unwrap();
+        let s = inject_session_state("Tier: {user:tier}", &ctx)
+            .await
+            .unwrap();
         assert_eq!(s, "Tier: pro");
     }
 
     #[tokio::test]
     async fn unterminated_brace_left_untouched() {
         let ctx = ctx_with_state(&[("x", json!("v"))]);
-        let s = inject_session_state("open { brace and {x}", &ctx).await.unwrap();
+        let s = inject_session_state("open { brace and {x}", &ctx)
+            .await
+            .unwrap();
         assert_eq!(s, "open { brace and v");
     }
 }

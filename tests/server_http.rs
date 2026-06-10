@@ -183,7 +183,10 @@ async fn session_crud_round_trip() {
     // Create with a server-assigned id; the UI posts `null`.
     let resp = app
         .clone()
-        .oneshot(post_json("/apps/test-app/users/alice/sessions", Value::Null))
+        .oneshot(post_json(
+            "/apps/test-app/users/alice/sessions",
+            Value::Null,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -203,8 +206,7 @@ async fn session_crud_round_trip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     assert!(
-        json_body(resp)
-            .await["detail"]
+        json_body(resp).await["detail"]
             .as_str()
             .unwrap()
             .contains("already exists")
@@ -333,10 +335,7 @@ async fn trace_and_eval_stubs_degrade_gracefully() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    let resp = app
-        .oneshot(get("/apps/test-app/eval_sets"))
-        .await
-        .unwrap();
+    let resp = app.oneshot(get("/apps/test-app/eval_sets")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(json_body(resp).await, json!([]));
 }
