@@ -13,9 +13,6 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 todo = "warn"
 dbg_macro = "warn"
-# Pedantic/nursery lints that fire heavily in idiomatic test, macro, or CLI
-# code without indicating real bugs. Allow at workspace level; opt back in
-# per-module if needed.
 unwrap_used = "allow"
 expect_used = "allow"
 panic = "allow"
@@ -124,6 +121,7 @@ repository = "https://github.com/skundu42/adk-rs"
 homepage = "https://github.com/skundu42/adk-rs"
 authors = ["Sandipan Kundu <sandipank.dev@gmail.com>"]
 readme = "README.md"
+exclude = ["/docs", "/adk-python-src-code", "/.claude"]
 keywords = ["agent", "llm", "ai", "adk", "ai-sdk"]
 categories = ["api-bindings", "asynchronous"]
 description = "Rust port of the Google Agent Development Kit (ADK)."

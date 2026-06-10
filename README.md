@@ -1,8 +1,8 @@
-# Agent Development Kit (RUST)
+# Agent Development Kit (adk-rs)
 
 An open-source, code-first Rust framework for building, evaluating, and deploying sophisticated AI agents with flexibility and control.
 
-Agent Development Kit (ADK) is a flexible, modular framework that applies software-engineering discipline to AI-agent construction. `adk-rs` is a Rust port of the Google's ADK Python implementation, aimed at teams that want low overhead, predictable latency, and the safety guarantees of the Rust toolchain. Like its Python counterpart, ADK is model-agnostic, deployment-agnostic, and integrates cleanly alongside other frameworks.
+This is a flexible, modular framework that applies software-engineering discipline to AI-agent construction. `adk-rs` is a Rust port of the Google's ADK Python implementation, aimed at teams that want low overhead, predictable latency, and the safety guarantees of the Rust toolchain. Like its Python counterpart, ADK is model-agnostic, deployment-agnostic, and integrates cleanly alongside other frameworks.
 
 ## ✨ Key Features
 
@@ -435,6 +435,16 @@ Runnable demos live under [`examples/`](examples/):
 cargo run --example weather_agent --features "gemini,macros"
 cargo run --example code_agent --features "code-exec,testing"
 ```
+
+## 📖 Documentation site
+
+A full documentation site (every module, feature flag, example, and guides) lives under [`docs/`](docs/) as a standalone Next.js app:
+
+```sh
+cd docs && npm install && npm run dev   # http://localhost:3000
+```
+
+The `docs/` folder is excluded from the published crate (`package.exclude` in `Cargo.toml`) and is not a workspace member — it never affects `cargo build`, `cargo test`, or `cargo publish`.
 
 ## 🤝 Contributing
 
