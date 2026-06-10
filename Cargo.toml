@@ -113,7 +113,7 @@ cognitive_complexity = "allow"
 
 [package]
 name = "adk-rs"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -138,6 +138,8 @@ default = []
 gemini = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
 anthropic = ["dep:reqwest", "dep:eventsource-stream", "dep:url"]
 openai = ["dep:reqwest"]
+# Gemini Live API: bidirectional WebSocket streaming (text + audio).
+live = ["gemini", "dep:tokio-tungstenite"]
 # Storage backends
 fs = []
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
@@ -161,7 +163,7 @@ a2a = ["dep:reqwest", "dep:url", "dep:eventsource-stream", "dep:axum", "dep:towe
 testing = []
 # Convenience: everything on
 full = [
-    "gemini", "anthropic", "openai",
+    "gemini", "anthropic", "openai", "live",
     "fs", "sqlite",
     "mcp", "telemetry", "eval", "server", "cli", "macros",
     "auth", "openapi", "code-exec", "code-exec-docker",
@@ -197,6 +199,7 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"], optional = true }
 eventsource-stream = { version = "0.2", optional = true }
 url = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
 
 # Storage deps
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "macros", "json", "chrono", "uuid", "migrate"], optional = true }

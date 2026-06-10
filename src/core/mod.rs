@@ -10,11 +10,13 @@ pub mod cache;
 pub mod callback;
 pub mod cancel;
 pub mod context;
+pub mod embedder;
 pub mod event;
 pub mod llm_request;
 pub mod llm_response;
 pub mod memory;
 pub mod model;
+pub mod retry;
 pub mod run_config;
 pub mod services;
 pub mod session;
@@ -39,11 +41,13 @@ pub use callback::{
 };
 pub use cancel::CancellationToken;
 pub use context::{InvocationContext, InvocationOrigin, ToolContext};
+pub use embedder::{Embedder, cosine_similarity};
 pub use event::{Event, EventActions, EventCompaction, history_with_compaction};
 pub use llm_request::LlmRequest;
 pub use llm_response::LlmResponse;
 pub use memory::{MemoryEntry, SearchMemoryResponse};
 pub use model::{Model, ModelRegistry};
+pub use retry::RetryConfig;
 pub use run_config::{ResumabilityConfig, RunConfig, StreamingMode};
 pub use services::{
     ArtifactService, CredentialService, GetSessionConfig, ListSessionsResponse, MemoryService,

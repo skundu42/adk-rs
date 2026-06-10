@@ -44,7 +44,60 @@ export const page: DocPage = {
     { kind: 'h2', text: 'InMemoryMemoryService' },
     {
       kind: 'p',
-      text: 'The bundled backend, `adk_rs::services::mem::InMemoryMemoryService`, keeps one bucket per `(app_name, user_id)`. `add_session_to_memory` walks the session’s events and stores one `MemoryEntry` per event with non-empty text content, preserving the author and timestamp. `search_memory` is a **case-insensitive substring match** over each entry’s text — good enough for tests and quickstarts; for production-grade semantic recall, implement `MemoryService` over a real vector store.',
+      text: 'The simplest bundled backend, `adk_rs::services::mem::InMemoryMemoryService`, keeps one bucket per `(app_name, user_id)`. `add_session_to_memory` walks the session’s events and stores one `MemoryEntry` per event with non-empty text content, preserving the author and timestamp. `search_memory` is a **case-insensitive substring match** over each entry’s text — good enough for tests and quickstarts. For semantic recall, use `VectorMemoryService` below.',
+    },
+    { kind: 'h2', text: 'VectorMemoryService (semantic search)' },
+    {
+      kind: 'p',
+      text: '`adk_rs::services::mem::VectorMemoryService` swaps substring matching for embedding-based retrieval. Entries are embedded once at ingest time through the `Embedder` trait; each search embeds the query and ranks entries by **cosine similarity**, returning the top `k` above an optional similarity floor. Storage is still process-local — the upgrade is retrieval quality, not durability.',
+    },
+    {
+      kind: 'api',
+      entries: [
+        {
+          sig: 'trait Embedder { async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> }',
+          desc: 'Batch text → vector. Implementations ship with the provider features: `GeminiEmbedder` (gemini) and `OpenAiEmbedder` (openai); implement it yourself to bridge any other backend. Exported from `adk_rs::core`.',
+        },
+        {
+          sig: 'VectorMemoryService::new(embedder: Arc<dyn Embedder>) -> Self',
+          desc: 'Construct with defaults: top 5 results, no similarity floor.',
+        },
+        {
+          sig: 'with_top_k(self, k: usize) -> Self',
+          desc: 'Maximum results per search.',
+        },
+        {
+          sig: 'with_min_score(self, score: f32) -> Self',
+          desc: 'Minimum cosine similarity (in [-1, 1]) for an entry to be returned.',
+        },
+      ],
+    },
+    {
+      kind: 'code',
+      lang: 'rust',
+      title: 'Semantic memory with a Gemini embedder',
+      code: `use adk_rs::providers::gemini::GeminiEmbedder;
+use adk_rs::services::mem::VectorMemoryService;
+use std::sync::Arc;
+
+let memory = VectorMemoryService::new(
+    Arc::new(GeminiEmbedder::from_env("gemini-embedding-001")?),
+)
+.with_top_k(5)
+.with_min_score(0.3);
+
+// Drop-in replacement for InMemoryMemoryService:
+let runner = Runner::builder()
+    .app_name("hotel")
+    .agent(agent)
+    .session_service(sessions)
+    .memory_service(Arc::new(memory))
+    .build()?;`,
+    },
+    {
+      kind: 'callout',
+      tone: 'tip',
+      text: 'The `testing` feature exports `adk_rs::core::testing::MockEmbedder` — a deterministic hashed bag-of-words embedder — so you can unit-test semantic memory flows without network access or API keys.',
     },
     { kind: 'h2', text: 'The load_memory tool (active recall)' },
     {

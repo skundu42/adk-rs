@@ -71,3 +71,40 @@ impl Model for MockModel {
         Ok(r)
     }
 }
+
+/// Deterministic, offline [`Embedder`](crate::core::Embedder): a hashed
+/// bag-of-words vector. Texts sharing words get high cosine similarity —
+/// crude, but stable and dependency-free, which is exactly what tests want.
+#[derive(Debug, Default)]
+pub struct MockEmbedder {
+    /// Vector dimensionality (default 256).
+    pub dim: usize,
+}
+
+#[async_trait]
+impl crate::core::embedder::Embedder for MockEmbedder {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let dim = if self.dim == 0 { 256 } else { self.dim };
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let mut v = vec![0.0f32; dim];
+                for word in t
+                    .to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                {
+                    // FNV-1a: deterministic across processes, unlike the
+                    // std hasher.
+                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                    for b in word.bytes() {
+                        h ^= b as u64;
+                        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    v[(h % dim as u64) as usize] += 1.0;
+                }
+                v
+            })
+            .collect())
+    }
+}

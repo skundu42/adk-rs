@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tracing::instrument;
 
+use crate::core::retry::RetryConfig;
 use crate::core::stream::LlmResponseStream;
 use crate::core::{LlmRequest, LlmResponse, Model};
 use crate::error::{Error, ProviderError, Result};
+use crate::providers::common::send_with_retry;
 
 use crate::providers::anthropic::convert::{parse_response, to_wire};
 
@@ -23,6 +25,8 @@ pub struct AnthropicConfig {
     pub api_key: String,
     /// HTTP request timeout.
     pub timeout: Duration,
+    /// Retry policy for transient failures (429 / 529 / 5xx / connect errors).
+    pub retry: RetryConfig,
 }
 
 impl Default for AnthropicConfig {
@@ -32,6 +36,7 @@ impl Default for AnthropicConfig {
             anthropic_version: "2023-06-01".into(),
             api_key: String::new(),
             timeout: Duration::from_secs(60),
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -96,16 +101,16 @@ impl Model for Anthropic {
             )));
         }
         let body = serde_json::to_vec(&to_wire(&req, &self.model_name))?;
-        let resp = self
-            .http
-            .post(self.endpoint())
-            .header("x-api-key", &self.cfg.api_key)
-            .header("anthropic-version", &self.cfg.anthropic_version)
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let resp = send_with_retry(&self.cfg.retry, || {
+            self.http
+                .post(self.endpoint())
+                .header("x-api-key", &self.cfg.api_key)
+                .header("anthropic-version", &self.cfg.anthropic_version)
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+        })
+        .await?;
         let status = resp.status();
         let bytes = resp
             .bytes()

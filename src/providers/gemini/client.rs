@@ -10,9 +10,11 @@ use reqwest::Client;
 use tracing::{debug, instrument, warn};
 
 use crate::core::cache::{CacheMetadata, ContextCacheConfig};
+use crate::core::retry::RetryConfig;
 use crate::core::stream::LlmResponseStream;
 use crate::core::{LlmRequest, LlmResponse, Model};
 use crate::error::{Error, ProviderError, Result};
+use crate::providers::common::send_with_retry;
 
 use crate::providers::gemini::convert::{
     WireCachedContentCreate, parse_response, to_wire, to_wire_cached,
@@ -45,6 +47,8 @@ pub struct GeminiConfig {
     pub api_key: String,
     /// HTTP request timeout.
     pub timeout: Duration,
+    /// Retry policy for transient failures (429 / 5xx / connect errors).
+    pub retry: RetryConfig,
 }
 
 impl Default for GeminiConfig {
@@ -54,6 +58,7 @@ impl Default for GeminiConfig {
             api_version: "v1beta".into(),
             api_key: String::new(),
             timeout: Duration::from_secs(60),
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -100,6 +105,12 @@ impl Gemini {
                 ..GeminiConfig::default()
             },
         )
+    }
+
+    /// Config accessor for sibling modules (the `live` WebSocket client).
+    #[cfg(feature = "live")]
+    pub(crate) fn config(&self) -> &GeminiConfig {
+        &self.cfg
     }
 
     fn endpoint(&self, action: &str) -> String {
@@ -228,15 +239,16 @@ impl Gemini {
             ttl: format!("{}s", cfg.ttl_seconds),
         };
         let key = self.auth_header()?;
-        let resp = self
-            .http
-            .post(&url)
-            .header("x-goog-api-key", key)
-            .header("content-type", "application/json")
-            .body(serde_json::to_vec(&body)?)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let body = serde_json::to_vec(&body)?;
+        let resp = send_with_retry(&self.cfg.retry, || {
+            self.http
+                .post(&url)
+                .header("x-goog-api-key", key.clone())
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+        })
+        .await?;
         let status = resp.status();
         let bytes = resp
             .bytes()
@@ -296,15 +308,15 @@ impl Model for Gemini {
         let (body, mut cache_meta) = self.wire_body(&req).await?;
         debug!(bytes = body.len(), %url, cached = cache_meta.is_some(), "Gemini request");
         let key = self.auth_header()?;
-        let mut resp = self
-            .http
-            .post(&url)
-            .header("x-goog-api-key", key.clone())
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let mut resp = send_with_retry(&self.cfg.retry, || {
+            self.http
+                .post(&url)
+                .header("x-goog-api-key", key.clone())
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+        })
+        .await?;
         let mut status = resp.status();
 
         // If the cached reference was rejected (expired/evicted server-side),
@@ -318,15 +330,15 @@ impl Model for Gemini {
                 );
                 self.invalidate_cache_entry(&meta.cache_name);
                 let body = serde_json::to_vec(&to_wire(&req))?;
-                resp = self
-                    .http
-                    .post(&url)
-                    .header("x-goog-api-key", key)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                resp = send_with_retry(&self.cfg.retry, || {
+                    self.http
+                        .post(&url)
+                        .header("x-goog-api-key", key.clone())
+                        .header("content-type", "application/json")
+                        .body(body.clone())
+                        .send()
+                })
+                .await?;
                 status = resp.status();
             }
         }
@@ -352,15 +364,15 @@ impl Model for Gemini {
         let url = format!("{}?alt=sse", self.endpoint("streamGenerateContent"));
         let (body, mut cache_meta) = self.wire_body(&req).await?;
         let key = self.auth_header()?;
-        let mut resp = self
-            .http
-            .post(&url)
-            .header("x-goog-api-key", key.clone())
-            .header("content-type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let mut resp = send_with_retry(&self.cfg.retry, || {
+            self.http
+                .post(&url)
+                .header("x-goog-api-key", key.clone())
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+        })
+        .await?;
         if !resp.status().is_success() && resp.status().is_client_error() {
             if let Some(meta) = cache_meta.take() {
                 warn!(
@@ -370,15 +382,15 @@ impl Model for Gemini {
                 );
                 self.invalidate_cache_entry(&meta.cache_name);
                 let body = serde_json::to_vec(&to_wire(&req))?;
-                resp = self
-                    .http
-                    .post(&url)
-                    .header("x-goog-api-key", key)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                resp = send_with_retry(&self.cfg.retry, || {
+                    self.http
+                        .post(&url)
+                        .header("x-goog-api-key", key.clone())
+                        .header("content-type", "application/json")
+                        .body(body.clone())
+                        .send()
+                })
+                .await?;
             }
         }
         if !resp.status().is_success() {
@@ -557,6 +569,7 @@ mod tests {
             GeminiConfig {
                 base_url: server.uri(),
                 api_key: "k".into(),
+                retry: RetryConfig::disabled(),
                 ..GeminiConfig::default()
             },
         )
@@ -565,6 +578,79 @@ mod tests {
         assert!(matches!(
             err,
             Error::Provider(ProviderError::Http { status: 429, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retried_until_success() {
+        let server = MockServer::start().await;
+        // First two attempts are rate-limited (one with Retry-After), the
+        // third succeeds. Mount order matters: wiremock picks the first
+        // matching mock with remaining allowance.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("rate limited"),
+            )
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": "ok"}]},
+                    "finishReason": "STOP"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let g = Gemini::new(
+            "gemini-2.5-flash",
+            GeminiConfig {
+                base_url: server.uri(),
+                api_key: "k".into(),
+                retry: RetryConfig {
+                    max_retries: 2,
+                    initial_backoff: std::time::Duration::from_millis(5),
+                    ..RetryConfig::default()
+                },
+                ..GeminiConfig::default()
+            },
+        )
+        .unwrap();
+        let r = g.generate_content(LlmRequest::default()).await.unwrap();
+        assert_eq!(r.content.unwrap().text_concat(), "ok");
+    }
+
+    #[tokio::test]
+    async fn retry_budget_exhausted_surfaces_last_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
+            .expect(2) // initial attempt + 1 retry
+            .mount(&server)
+            .await;
+        let g = Gemini::new(
+            "gemini-2.5-flash",
+            GeminiConfig {
+                base_url: server.uri(),
+                api_key: "k".into(),
+                retry: RetryConfig {
+                    max_retries: 1,
+                    initial_backoff: std::time::Duration::from_millis(5),
+                    ..RetryConfig::default()
+                },
+                ..GeminiConfig::default()
+            },
+        )
+        .unwrap();
+        let err = g.generate_content(LlmRequest::default()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Provider(ProviderError::Http { status: 503, .. })
         ));
     }
 

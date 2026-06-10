@@ -25,6 +25,7 @@ import { page as memory } from '@/content/memory';
 
 import { page as models } from '@/content/models';
 import { page as providers } from '@/content/providers';
+import { page as live } from '@/content/live';
 
 import { page as toolsOverview } from '@/content/tools-overview';
 import { page as functionTools } from '@/content/function-tools';
@@ -75,6 +76,7 @@ const all: DocPage[] = [
   memory,
   models,
   providers,
+  live,
   toolsOverview,
   functionTools,
   builtinTools,
@@ -119,7 +121,7 @@ export const nav: NavGroup[] = [
   },
   {
     label: 'Models',
-    slugs: ['models', 'providers'],
+    slugs: ['models', 'providers', 'live'],
   },
   {
     label: 'Tools',
@@ -181,4 +183,4 @@ export function prevNext(slug: string): { prev?: DocPage; next?: DocPage } {
 }
 
 export const REPO_URL = 'https://github.com/skundu42/adk-rs';
-export const CRATE_VERSION = '0.3.0';
+export const CRATE_VERSION = '0.4.0';

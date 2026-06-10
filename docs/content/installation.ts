@@ -28,7 +28,7 @@ cargo add futures`,
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3", features = ["gemini", "macros"] }
+adk-rs = { version = "0.4", features = ["gemini", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"`,
     },
@@ -50,6 +50,7 @@ futures = "0.3"`,
         ['`gemini`', 'Gemini REST + SSE provider (`providers::gemini`).', '`reqwest`, `eventsource-stream`, `url`'],
         ['`anthropic`', 'Anthropic Messages API + SSE provider.', '`reqwest`, `eventsource-stream`, `url`'],
         ['`openai`', 'OpenAI-compatible provider; serves Azure OpenAI, Ollama, and Groq via base-URL override.', '`reqwest`'],
+        ['`live`', '[Gemini Live API](/docs/live) — bidirectional WebSocket streaming; implies `gemini`.', '`tokio-tungstenite`'],
         ['`fs`', 'Filesystem [artifact service](/docs/artifacts), path-traversal hardened.', 'none'],
         ['`sqlite`', 'SQL `SessionService` backed by SQLite.', '`sqlx` (sqlite)'],
         ['`postgres`', 'SQL `SessionService` backed by PostgreSQL.', '`sqlx` (postgres)'],
@@ -73,7 +74,7 @@ futures = "0.3"`,
       kind: 'callout',
       tone: 'note',
       title: '`full` is not literally everything',
-      text: '`full` enables `gemini`, `anthropic`, `openai`, `fs`, `sqlite`, `mcp`, `telemetry`, `eval`, `server`, `cli`, `macros`, `auth`, `openapi`, `code-exec`, `code-exec-docker`, `a2a`, and `testing` — but **not** `postgres` or `otel`. Add those two explicitly if you need them.',
+      text: '`full` enables `gemini`, `anthropic`, `openai`, `live`, `fs`, `sqlite`, `mcp`, `telemetry`, `eval`, `server`, `cli`, `macros`, `auth`, `openapi`, `code-exec`, `code-exec-docker`, `a2a`, and `testing` — but **not** `postgres` or `otel`. Add those two explicitly if you need them.',
     },
     { kind: 'h2', text: 'Provider credentials' },
     {

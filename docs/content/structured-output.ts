@@ -76,20 +76,24 @@ let schema = Schema::from_schemars(&root)?;`,
     },
     { kind: 'h2', text: 'Provider mapping' },
     {
+      kind: 'p',
+      text: 'All three providers now enforce the schema **server-side**. The adk schema (OpenAPI-3 flavour) is converted to each provider\'s JSON Schema dialect on the way out: types lowercased, `nullable` becoming a `["type", "null"]` union, `additionalProperties: false` added to objects, and advisory keywords the providers reject (`pattern`, `format`, `minimum`, length/item bounds, …) stripped.',
+    },
+    {
       kind: 'table',
       head: ['Provider', 'What is sent'],
       rows: [
         [
           '[Gemini](/docs/providers)',
-          'Full fidelity: `responseSchema` and `responseMimeType` go onto the wire request, so the server enforces the schema.',
+          'Native: `responseSchema` and `responseMimeType` go onto the wire request.',
         ],
         [
           'OpenAI-compatible',
-          'When `response_mime_type` is `application/json` and a schema is present, the request gets `response_format: {"type": "json_object"}` — JSON mode, but the schema itself is not transmitted. Describe the expected shape in the instruction too.',
+          'Strict structured outputs: `response_format: {"type": "json_schema", "json_schema": {"strict": true, ...}}`. Strict mode requires every property listed in `required`, so previously-optional properties are sent as required-but-nullable — the original semantics survive. A JSON mime type *without* a schema still maps to plain `{"type": "json_object"}` mode.',
         ],
         [
           'Anthropic',
-          'The provider does not map `response_schema`/`response_mime_type`; rely on the instruction to request JSON.',
+          'Native structured outputs: the Messages API\'s `output_config: {"format": {"type": "json_schema", ...}}`. Requires a structured-outputs-capable Claude model (Claude 4.5-generation and newer).',
         ],
       ],
     },

@@ -31,12 +31,42 @@ export const page: DocPage = {
       lang: 'toml',
       title: 'Cargo.toml',
       code: `[dependencies]
-adk-rs = { version = "0.3", features = ["gemini", "anthropic", "openai"] }`,
+adk-rs = { version = "0.4", features = ["gemini", "anthropic", "openai"] }`,
+    },
+    { kind: 'h2', text: 'Retries' },
+    {
+      kind: 'p',
+      text: 'Every provider client retries transient failures automatically: 429 rate limits (honouring a `Retry-After` header up to 60s), 408/409/5xx responses, and connect/timeout transport errors. Backoff is exponential with full jitter. The policy lives on each config as a `retry: RetryConfig` field; the default mirrors the official provider SDKs — 2 retries, 500ms initial backoff, 8s cap. Other 4xx errors (bad request, auth) fail immediately.',
+    },
+    {
+      kind: 'code',
+      lang: 'rust',
+      title: 'Tuning or disabling the retry policy',
+      code: `use adk_rs::core::RetryConfig;
+use adk_rs::providers::gemini::{Gemini, GeminiConfig};
+use std::time::Duration;
+
+let model = Gemini::new("gemini-2.5-flash", GeminiConfig {
+    api_key: std::env::var("GOOGLE_API_KEY")?,
+    retry: RetryConfig {
+        max_retries: 5,
+        initial_backoff: Duration::from_millis(250),
+        max_backoff: Duration::from_secs(30),
+        ..RetryConfig::default()
+    },
+    // or: retry: RetryConfig::disabled(),
+    ..GeminiConfig::default()
+})?;`,
+    },
+    {
+      kind: 'callout',
+      tone: 'note',
+      text: 'For streaming calls the retry covers connection establishment only — once the first SSE byte has been read, a mid-stream failure surfaces as a stream error rather than a silent replay.',
     },
     { kind: 'h2', text: 'Gemini' },
     {
       kind: 'p',
-      text: 'The Gemini client speaks the `generateContent` REST API and real SSE streaming. `Gemini::from_env(model_name)` reads `$GOOGLE_API_KEY`; `Gemini::new(model_name, GeminiConfig)` gives full control. `GeminiConfig` has four fields: `base_url` (default `https://generativelanguage.googleapis.com`), `api_version` (default `v1beta`), `api_key`, and `timeout` (default 60 s). The API key travels in the `x-goog-api-key` header.',
+      text: 'The Gemini client speaks the `generateContent` REST API and real SSE streaming. `Gemini::from_env(model_name)` reads `$GOOGLE_API_KEY`; `Gemini::new(model_name, GeminiConfig)` gives full control. `GeminiConfig` has five fields: `base_url` (default `https://generativelanguage.googleapis.com`), `api_version` (default `v1beta`), `api_key`, `timeout` (default 60 s), and `retry`. The API key travels in the `x-goog-api-key` header.',
     },
     {
       kind: 'list',
@@ -44,6 +74,7 @@ adk-rs = { version = "0.3", features = ["gemini", "anthropic", "openai"] }`,
         '**Streaming** — `stream_generate_content` POSTs to `:streamGenerateContent?alt=sse` and decodes the SSE chunks into a stream of `LlmResponse` values.',
         '**Server-side built-in tools** — when the request config carries `Tool::GoogleSearch {}`, `Tool::UrlContext {}`, or `Tool::CodeExecution {}` (injected by the [Gemini built-in tool handles](/docs/builtin-tools)), Gemini runs search grounding, URL grounding, or sandboxed Python on Google’s servers.',
         '**Context caching** — if the request carries a `ContextCacheConfig`, the client creates a server-side `cachedContents` entry for the stable prefix (system instruction + tools), reuses it on later calls keyed by a fingerprint, and transparently retries without the cache if the server rejects a stale entry. See [Context caching](/docs/context-caching).',
+        '**Live API** — with the `live` feature, `Gemini::connect_live` opens a bidirectional WebSocket session for realtime text and audio. See [Gemini Live](/docs/live).',
       ],
     },
     { kind: 'h2', text: 'Anthropic' },
@@ -76,6 +107,11 @@ export OPENAI_API_KEY=ollama   # any non-empty value
 # Groq
 export OPENAI_BASE_URL=https://api.groq.com/openai/v1
 export OPENAI_API_KEY=gsk_...`,
+    },
+    { kind: 'h2', text: 'Embedders' },
+    {
+      kind: 'p',
+      text: 'Both the Gemini and OpenAI features ship an [`Embedder`](/docs/memory) implementation for semantic memory: `GeminiEmbedder` (the `batchEmbedContents` API, e.g. `gemini-embedding-001`) and `OpenAiEmbedder` (the `/embeddings` endpoint, e.g. `text-embedding-3-small` — also reaches Azure and Ollama via `OPENAI_BASE_URL`). Each has the same `from_env` / config constructors as its chat sibling and shares the retry policy. Plug either into [`VectorMemoryService`](/docs/memory).',
     },
     { kind: 'h2', text: 'Transport security: HTTPS or loopback' },
     {

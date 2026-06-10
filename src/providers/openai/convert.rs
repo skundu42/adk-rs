@@ -158,7 +158,20 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         .collect();
 
     let response_format = match (&req.config.response_mime_type, &req.config.response_schema) {
-        (Some(m), Some(_)) if m == "application/json" => Some(serde_json::json!({
+        // With a schema: strict structured outputs — the server enforces the
+        // shape. Optional properties are transformed to required-but-nullable
+        // (an OpenAI strict-mode constraint); see
+        // `providers::common::to_json_schema`.
+        (Some(m), Some(schema)) if m == "application/json" => Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "strict": true,
+                "schema": crate::providers::common::to_json_schema(schema, true),
+            },
+        })),
+        // JSON mime type without a schema: plain JSON mode.
+        (Some(m), None) if m == "application/json" => Some(serde_json::json!({
             "type": "json_object",
         })),
         _ => None,
@@ -330,6 +343,38 @@ mod tests {
         let r = parse_response(body.to_string().as_bytes()).unwrap();
         assert_eq!(r.content.unwrap().text_concat(), "hi");
         assert_eq!(r.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn response_schema_maps_to_strict_json_schema() {
+        use crate::genai_types::Schema;
+        let mut req = LlmRequest::default();
+        req.set_output_schema(
+            Schema::object()
+                .property("name", Schema::string())
+                .property("age", Schema::integer())
+                .require("name"),
+        );
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o")).unwrap();
+        let rf = &w["response_format"];
+        assert_eq!(rf["type"], "json_schema");
+        assert_eq!(rf["json_schema"]["name"], "response");
+        assert_eq!(rf["json_schema"]["strict"], true);
+        let schema = &rf["json_schema"]["schema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            schema["properties"]["age"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+    }
+
+    #[test]
+    fn json_mime_without_schema_maps_to_json_object() {
+        let mut req = LlmRequest::default();
+        req.config.response_mime_type = Some("application/json".into());
+        let w = serde_json::to_value(to_wire(&req, "gpt-4o")).unwrap();
+        assert_eq!(w["response_format"]["type"], "json_object");
     }
 
     #[test]

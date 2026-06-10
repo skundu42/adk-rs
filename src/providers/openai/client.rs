@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tracing::instrument;
 
+use crate::core::retry::RetryConfig;
 use crate::core::stream::LlmResponseStream;
 use crate::core::{LlmRequest, LlmResponse, Model};
 use crate::error::{Error, ProviderError, Result};
+use crate::providers::common::send_with_retry;
 
 use crate::providers::openai::convert::{parse_response, to_wire};
 
@@ -25,6 +27,8 @@ pub struct OpenAiConfig {
     pub organization: Option<String>,
     /// HTTP timeout.
     pub timeout: Duration,
+    /// Retry policy for transient failures (429 / 5xx / connect errors).
+    pub retry: RetryConfig,
 }
 
 impl Default for OpenAiConfig {
@@ -35,6 +39,7 @@ impl Default for OpenAiConfig {
             api_version: None,
             organization: None,
             timeout: Duration::from_secs(60),
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -114,19 +119,18 @@ impl Model for OpenAi {
             )));
         }
         let body = serde_json::to_vec(&to_wire(&req, &self.model_name))?;
-        let mut rb = self
-            .http
-            .post(self.endpoint())
-            .header("authorization", format!("Bearer {}", self.cfg.api_key))
-            .header("content-type", "application/json");
-        if let Some(org) = &self.cfg.organization {
-            rb = rb.header("openai-organization", org);
-        }
-        let resp = rb
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let resp = send_with_retry(&self.cfg.retry, || {
+            let mut rb = self
+                .http
+                .post(self.endpoint())
+                .header("authorization", format!("Bearer {}", self.cfg.api_key))
+                .header("content-type", "application/json");
+            if let Some(org) = &self.cfg.organization {
+                rb = rb.header("openai-organization", org);
+            }
+            rb.body(body.clone()).send()
+        })
+        .await?;
         let status = resp.status();
         let bytes = resp
             .bytes()

@@ -28,6 +28,9 @@ pub(crate) struct WireRequest<'a> {
     pub stop_sequences: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    /// Structured-output constraint (`{"format": {"type": "json_schema", ...}}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +100,20 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         .flat_map(|decls| decls.iter().map(declaration_to_wire))
         .collect();
 
+    // Structured outputs: map the request schema to the Messages API's
+    // native `output_config.format` (json_schema). The server then enforces
+    // the shape, mirroring Gemini's `responseSchema`. Requires a
+    // structured-outputs-capable Claude model.
+    let output_config = match (&req.config.response_mime_type, &req.config.response_schema) {
+        (Some(m), Some(schema)) if m == "application/json" => Some(serde_json::json!({
+            "format": {
+                "type": "json_schema",
+                "schema": crate::providers::common::to_json_schema(schema, false),
+            },
+        })),
+        _ => None,
+    };
+
     WireRequest {
         model,
         max_tokens: req.config.max_output_tokens.unwrap_or(2048),
@@ -108,6 +125,7 @@ pub(crate) fn to_wire<'a>(req: &'a LlmRequest, model: &'a str) -> WireRequest<'a
         top_k: req.config.top_k,
         stop_sequences: req.config.stop_sequences.clone(),
         stream: false,
+        output_config,
     }
 }
 
@@ -312,6 +330,32 @@ mod tests {
         let calls = r.function_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id.as_deref(), Some("tu-1"));
+    }
+
+    #[test]
+    fn response_schema_maps_to_output_config() {
+        use crate::genai_types::Schema;
+        let mut req = LlmRequest::default();
+        req.set_output_schema(
+            Schema::object()
+                .property("capital", Schema::string())
+                .require("capital"),
+        );
+        let w = serde_json::to_value(to_wire(&req, "claude-sonnet-4-6")).unwrap();
+        let format = &w["output_config"]["format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["schema"]["type"], "object");
+        assert_eq!(format["schema"]["additionalProperties"], false);
+        assert_eq!(format["schema"]["required"], json!(["capital"]));
+        // Original `required` is preserved (no strict all-required rewrite).
+        assert_eq!(format["schema"]["properties"]["capital"]["type"], "string");
+    }
+
+    #[test]
+    fn no_output_config_without_schema() {
+        let req = LlmRequest::default();
+        let w = serde_json::to_value(to_wire(&req, "claude-sonnet-4-6")).unwrap();
+        assert!(w.get("output_config").is_none());
     }
 
     #[test]
