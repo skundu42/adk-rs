@@ -209,7 +209,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 # Telemetry deps
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
 opentelemetry = { version = "0.27", optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 
