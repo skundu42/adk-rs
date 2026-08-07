@@ -12,7 +12,7 @@
     "@fontsource-variable/bricolage-grotesque": "^5.2.5",
     "@fontsource-variable/jetbrains-mono": "^5.2.5",
     "@fontsource-variable/newsreader": "^5.2.5",
-    "next": "^15.5.21",
+    "next": "^16.3.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
